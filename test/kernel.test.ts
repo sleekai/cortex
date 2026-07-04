@@ -140,3 +140,46 @@ test('runTask: persists artifacts, state, and metrics for CLI and MCP alike', as
   assert.equal(record.workerId, 'echo-worker')
   assert.equal(record.ok, false)
 })
+
+// ── Run checkpoints (execution store) ──────────────────────────────────
+import { saveRunCheckpoint, loadRunCheckpoint, runCheckpointPath } from '../src/state/store.js'
+import { makeArtifact } from '../src/artifact/artifacts.js'
+import { type NodeResult } from '../src/worker/dispatch.js'
+
+function nodeResult(nodeId: string, kind: 'patch' | 'failure'): NodeResult {
+  const artifact = kind === 'patch'
+    ? makeArtifact('patch', nodeId, 'w1', { diff: '--- a/x\n+++ b/x', reasoning: 'r' })
+    : makeArtifact('failure', nodeId, 'w1', { reason: 'boom', recoverable: true })
+  return { nodeId, workerId: 'w1', artifact, latencyMs: 5, attempts: 1 }
+}
+
+test('run checkpoints round-trip settled nodes and drop failures', () => {
+  const dir = makeProject(false)
+  const results = new Map<string, NodeResult>([
+    ['a', nodeResult('a', 'patch')],
+    ['b', nodeResult('b', 'failure')],
+  ])
+  saveRunCheckpoint(dir, 'run-1', results)
+
+  const restored = loadRunCheckpoint(dir, 'run-1')
+  assert.ok(restored.has('a'))
+  // Failures are not worth resuming from — they must re-run.
+  assert.equal(restored.has('b'), false)
+  assert.equal(restored.get('a')!.artifact.kind, 'patch')
+})
+
+test('run checkpoints tolerate missing or corrupt files', () => {
+  const dir = makeProject(false)
+  assert.equal(loadRunCheckpoint(dir, 'never-saved').size, 0)
+  const file = runCheckpointPath(dir, 'corrupt')
+  fs.mkdirSync(path.dirname(file), { recursive: true })
+  fs.writeFileSync(file, '{not json')
+  assert.equal(loadRunCheckpoint(dir, 'corrupt').size, 0)
+})
+
+test('run checkpoint filenames are sanitized', () => {
+  const dir = makeProject(false)
+  const file = runCheckpointPath(dir, '../evil/run id')
+  assert.ok(file.startsWith(path.join(dir, '.cortex', 'runs')))
+  assert.ok(!file.includes('..'))
+})

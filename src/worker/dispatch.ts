@@ -37,6 +37,16 @@ export interface DispatchOptions {
   timeoutMs: number
   maxOutputBytes: number
   onMetric?: (record: MetricRecord) => void
+  // Fires once per node this run actually dispatched (not for synthetic
+  // dependency-failure or cancellation results) — the checkpointing seam.
+  onNodeComplete?: (result: NodeResult) => void
+  // Cancellation is cooperative and settles at node/rung boundaries: nothing
+  // new is launched after abort, but an in-flight harness call runs to
+  // completion (true mid-call abort needs harness support; deferred).
+  signal?: AbortSignal
+  // Resume/replay: nodes whose ids appear here are treated as already
+  // settled and are not re-executed (partial recomputation).
+  resumeFrom?: ReadonlyMap<string, NodeResult>
 }
 
 export const DEFAULT_DISPATCH_OPTIONS: DispatchOptions = {
@@ -74,6 +84,15 @@ export async function dispatchWithLadder(
   let lastWorkerId = ladder[0]!.worker.id
 
   for (const rung of ladder) {
+    if (options.signal?.aborted) {
+      return {
+        nodeId: packet.t,
+        workerId: lastWorkerId,
+        artifact: makeArtifact('failure', packet.t, 'kernel', { reason: 'cancelled', recoverable: true }),
+        latencyMs: totalLatency,
+        attempts,
+      }
+    }
     const worker = rung.worker
     const harness = createHarness(worker.harness)
 
@@ -132,7 +151,9 @@ export async function dispatchWithLadder(
 
 // Execute a DAG: nodes whose dependencies are settled run concurrently up to
 // the plan's concurrency bound. A failed node fails its dependents without
-// running them (fan-in short-circuit).
+// running them (fan-in short-circuit). `options.resumeFrom` seeds settled
+// nodes (replay skips them); `options.signal` cancels at node boundaries;
+// `options.onNodeComplete` fires per dispatched node for checkpointing.
 export async function executePlan(
   plan: DispatchPlan,
   ladderFor: (node: DispatchNode) => ScoredWorker[],
@@ -143,9 +164,36 @@ export async function executePlan(
   const running = new Map<string, Promise<void>>()
   const concurrency = Math.max(1, plan.concurrency)
 
+  if (options.resumeFrom) {
+    for (const [id, prior] of options.resumeFrom) {
+      if (pending.has(id)) {
+        results.set(id, prior)
+        pending.delete(id)
+        info(`dispatch: node ${id} restored from checkpoint, skipping`)
+      }
+    }
+  }
+
   const isFailure = (r: NodeResult) => isKind(r.artifact, 'failure')
 
   while (pending.size > 0 || running.size > 0) {
+    if (options.signal?.aborted && pending.size > 0) {
+      for (const [id, node] of pending) {
+        results.set(id, {
+          nodeId: id,
+          workerId: 'kernel',
+          artifact: makeArtifact('failure', node.packet.t, 'kernel', {
+            reason: 'cancelled',
+            recoverable: true,
+          }),
+          latencyMs: 0,
+          attempts: 0,
+        })
+      }
+      pending.clear()
+      warn(`dispatch: cancelled — ${running.size} in-flight node(s) draining`)
+    }
+
     for (const [id, node] of pending) {
       if (running.size >= concurrency) break
       const deps = node.dependsOn.map(d => results.get(d))
@@ -170,7 +218,11 @@ export async function executePlan(
       }
 
       const task = dispatchWithLadder(node.packet, node.chunks, ladderFor(node), options)
-        .then(r => { results.set(id, { ...r, nodeId: id }) })
+        .then(r => {
+          const settled = { ...r, nodeId: id }
+          results.set(id, settled)
+          options.onNodeComplete?.(settled)
+        })
         .finally(() => { running.delete(id) })
       running.set(id, task)
     }

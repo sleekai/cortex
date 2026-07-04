@@ -133,3 +133,89 @@ test('executePlan detects unsatisfiable dependencies', async () => {
   const results = await executePlan({ nodes, concurrency: 1 }, () => [])
   assert.ok(isKind(results.get('x')!.artifact, 'failure'))
 })
+
+test('executePlan resumes from checkpoint — settled nodes never re-dispatch', async () => {
+  invocations = []
+  scripts.set('good', () => ({ ok: true, output: GOOD_DIFF }))
+
+  const nodes: DispatchNode[] = [
+    { id: 'a', packet: workPacket('a'), chunks: [], dependsOn: [] },
+    { id: 'b', packet: workPacket('b'), chunks: [], dependsOn: ['a'] },
+  ]
+  const priorA = await dispatchWithLadder(workPacket('a'), [], [fakeWorker('good-a', 1, 'good')])
+  invocations = []
+
+  const results = await executePlan({ nodes, concurrency: 2 }, () => [fakeWorker('good-b', 1, 'good')], {
+    timeoutMs: 1000,
+    maxOutputBytes: 1024,
+    resumeFrom: new Map([['a', { ...priorA, nodeId: 'a' }]]),
+  })
+  // Only b dispatched; a came from the checkpoint seed.
+  assert.deepEqual(invocations, ['good'])
+  assert.ok(isKind(results.get('a')!.artifact, 'patch'))
+  assert.ok(isKind(results.get('b')!.artifact, 'patch'))
+})
+
+test('executePlan fires onNodeComplete per dispatched node, not for synthetic results', async () => {
+  scripts.set('good', () => ({ ok: true, output: GOOD_DIFF }))
+  scripts.set('bad', () => ({ ok: true, output: 'IMPOSSIBLE: nope' }))
+
+  const nodes: DispatchNode[] = [
+    { id: 'a', packet: workPacket('a'), chunks: [], dependsOn: [] },
+    { id: 'b', packet: workPacket('b'), chunks: [], dependsOn: [] },
+    { id: 'c', packet: workPacket('c'), chunks: [], dependsOn: ['b'] },
+  ]
+  const ladders: Record<string, ScoredWorker[]> = {
+    a: [fakeWorker('good-a', 1, 'good')],
+    b: [fakeWorker('bad-b', 1, 'bad')],
+    c: [fakeWorker('good-c', 1, 'good')],
+  }
+  const completed: string[] = []
+  await executePlan({ nodes, concurrency: 2 }, (n) => ladders[n.id]!, {
+    timeoutMs: 1000,
+    maxOutputBytes: 1024,
+    onNodeComplete: (r) => completed.push(r.nodeId),
+  })
+  // c failed synthetically (dependency short-circuit) — no callback for it.
+  assert.deepEqual(completed.sort(), ['a', 'b'])
+})
+
+test('executePlan abort cancels unstarted nodes as recoverable failures', async () => {
+  invocations = []
+  scripts.set('good', () => ({ ok: true, output: GOOD_DIFF }))
+
+  const controller = new AbortController()
+  const nodes: DispatchNode[] = [
+    { id: 'a', packet: workPacket('a'), chunks: [], dependsOn: [] },
+    { id: 'b', packet: workPacket('b'), chunks: [], dependsOn: ['a'] },
+  ]
+  const results = await executePlan({ nodes, concurrency: 1 }, () => [fakeWorker('good-w', 1, 'good')], {
+    timeoutMs: 1000,
+    maxOutputBytes: 1024,
+    signal: controller.signal,
+    onNodeComplete: () => controller.abort(),
+  })
+  // a dispatched, then abort — b settles as cancelled without dispatching.
+  assert.deepEqual(invocations, ['good'])
+  assert.ok(isKind(results.get('a')!.artifact, 'patch'))
+  const b = results.get('b')!
+  assert.ok(isKind(b.artifact, 'failure'))
+  assert.equal(b.attempts, 0)
+  assert.equal((b.artifact as { body: { reason: string; recoverable: boolean } }).body.reason, 'cancelled')
+  assert.equal((b.artifact as { body: { recoverable: boolean } }).body.recoverable, true)
+})
+
+test('dispatchWithLadder honors a pre-aborted signal without dispatching', async () => {
+  invocations = []
+  scripts.set('good', () => ({ ok: true, output: GOOD_DIFF }))
+  const controller = new AbortController()
+  controller.abort()
+  const result = await dispatchWithLadder(workPacket('t-abort'), [], [fakeWorker('good-x', 1, 'good')], {
+    timeoutMs: 1000,
+    maxOutputBytes: 1024,
+    signal: controller.signal,
+  })
+  assert.deepEqual(invocations, [])
+  assert.ok(isKind(result.artifact, 'failure'))
+  assert.equal((result.artifact as { body: { reason: string } }).body.reason, 'cancelled')
+})
