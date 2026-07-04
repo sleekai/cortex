@@ -8,16 +8,12 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { DEFAULT_BUDGET, type BudgetConfig } from './core/types.js'
 import { compileIntent } from './capability/intent-compiler.js'
-import { planDispatch } from './capability/planner.js'
-import { DEFAULT_POLICY } from './capability/policy.js'
 import { loadRegistry } from './worker/registry.js'
 import { compileContext } from './retrieval/context-compiler.js'
-import { generateWorkPacket } from './packet/generator.js'
-import { enforceBudget } from './packet/budget-controller.js'
 import { buildPrompt } from './worker/prompt.js'
-import { runValidationLoop } from './validator/validation-loop.js'
-import { initProject, loadState } from './state/store.js'
-import { appendMetric, readMetrics, aggregateStats, reliabilityOverrides } from './state/metrics.js'
+import { planTask, prepareDispatch, runTask } from './kernel/kernel.js'
+import { initProject } from './state/store.js'
+import { readMetrics, aggregateStats } from './state/metrics.js'
 import { createHarness } from './harness/harness.js'
 
 const server = new McpServer({
@@ -45,11 +41,7 @@ server.registerTool('cortex_plan', {
 }, (args) => {
   try {
     const projectRoot = resolveDir(args.dir)
-    const intent = compileIntent(args.task)
-    const registry = loadRegistry(projectRoot)
-    const priors = new Map(registry.workers.map(w => [w.id, w.reliability]))
-    const overrides = reliabilityOverrides(projectRoot, priors)
-    const plan = planDispatch(intent, registry, DEFAULT_POLICY, overrides, DEFAULT_BUDGET.retryProbability)
+    const { intent, plan } = planTask(args.task, projectRoot)
     return { content: [{ type: 'text', text: JSON.stringify({ intent, plan }, null, 2) }] }
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : String(e)
@@ -142,52 +134,45 @@ server.registerTool('cortex_dispatch', {
 }, async (args) => {
   try {
     const projectRoot = resolveDir(args.dir)
-    const goal = args.goal ?? args.task
     const budget = args.budget ?? DEFAULT_BUDGET.maxInputTokens
-    const timeout = args.timeout ?? 180_000
     const budgetConfig: BudgetConfig = { ...DEFAULT_BUDGET, maxInputTokens: budget }
-
-    const intent = compileIntent(args.task)
-    const registry = loadRegistry(projectRoot)
-    const priors = new Map(registry.workers.map(w => [w.id, w.reliability]))
-    const overrides = reliabilityOverrides(projectRoot, priors)
-    const plan = planDispatch(intent, registry, DEFAULT_POLICY, overrides, DEFAULT_BUDGET.retryProbability)
-
-    if (plan.tier0) {
-      const context = compileContext(projectRoot, goal, { ...intent, taskType: 'locate' as const }, budgetConfig)
-      return { content: [{ type: 'text', text: context.pointers.join('\n') }] }
-    }
-
-    const context = compileContext(projectRoot, goal, intent, budgetConfig)
-    const previousFacts = loadState(projectRoot).distilledFacts
-    const ucp = generateWorkPacket(args.task, context.chunks, previousFacts)
-    const spendContext = plan.ladder[0] ? { cost: plan.ladder[0].worker.cost } : undefined
-    const budgeted = enforceBudget(ucp, context.chunks, budgetConfig, spendContext)
-
-    if (budgeted.refused) {
-      return { content: [{ type: 'text', text: `budget refused dispatch: ${budgeted.refusedReason}` }], isError: true }
+    const config = {
+      projectRoot,
+      goal: args.goal ?? args.task,
+      budget: budgetConfig,
+      timeoutMs: args.timeout ?? 180_000,
     }
 
     if (args.dry_run) {
-      const prompt = buildPrompt(budgeted.ucp, budgeted.chunks)
-      const ladder = plan.ladder.map(r => `${r.worker.id} (tier ${r.worker.tier}): ${r.justification}`).join('\n')
+      const prepared = prepareDispatch(args.task, config)
+      if (prepared.kind === 'pointers') {
+        return { content: [{ type: 'text', text: prepared.pointers.join('\n') }] }
+      }
+      if (prepared.kind === 'refused') {
+        return { content: [{ type: 'text', text: `budget refused dispatch: ${prepared.reason}` }], isError: true }
+      }
+      const prompt = buildPrompt(prepared.ucp, prepared.budgeted.chunks)
+      const ladder = prepared.plan.ladder.map(r => `${r.worker.id} (tier ${r.worker.tier}): ${r.justification}`).join('\n')
       return { content: [
-        { type: 'text', text: JSON.stringify(budgeted.ucp, null, 2) },
+        { type: 'text', text: JSON.stringify(prepared.ucp, null, 2) },
         { type: 'text', text: `\n--- ladder ---\n${ladder}` },
-        { type: 'text', text: `\n--- prompt (${budgeted.totalTokens} est tokens) ---\n${prompt}` },
+        { type: 'text', text: `\n--- prompt (${prepared.budgeted.totalTokens} est tokens) ---\n${prompt}` },
       ]}
     }
 
-    const result = await runValidationLoop(budgeted.ucp, budgeted.chunks, plan.ladder, projectRoot, {
-      timeoutMs: timeout,
-      maxOutputBytes: 10 * 1024 * 1024,
-      onMetric: (record) => appendMetric(projectRoot, record),
-    })
+    const outcome = await runTask(args.task, config)
+    if (outcome.kind === 'pointers') {
+      return { content: [{ type: 'text', text: outcome.pointers.join('\n') }] }
+    }
+    if (outcome.kind === 'refused') {
+      return { content: [{ type: 'text', text: `budget refused dispatch: ${outcome.reason}` }], isError: true }
+    }
 
+    const { result } = outcome
     const verdict = result.success ? 'PASS' : 'FAIL'
     const output: string[] = [
       `Result: ${verdict}`,
-      `Task: ${budgeted.ucp.t}`,
+      `Task: ${outcome.ucp.t}`,
       `Iterations: ${result.iterations}`,
       `Patch: ${result.patch ? `${result.patch.length} chars` : 'none'}`,
       `Reasoning: ${result.reasoning || 'none'}`,

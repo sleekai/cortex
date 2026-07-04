@@ -10,18 +10,15 @@ import './harness/cli-harness.js'
 import './harness/http-harness.js'
 
 import { DEFAULT_BUDGET, type BudgetConfig } from './core/types.js'
-import { info, warn, error as logError } from './core/logger.js'
+import { info, error as logError } from './core/logger.js'
 import { compileIntent } from './capability/intent-compiler.js'
-import { planDispatch, type Plan } from './capability/planner.js'
-import { DEFAULT_POLICY } from './capability/policy.js'
 import { loadRegistry } from './worker/registry.js'
 import { compileContext } from './retrieval/context-compiler.js'
-import { generateWorkPacket } from './packet/generator.js'
-import { enforceBudget } from './packet/budget-controller.js'
 import { buildPrompt } from './worker/prompt.js'
-import { runValidationLoop, type LoopResult } from './validator/validation-loop.js'
-import { initProject, updateState, loadState, saveArtifact, stateDir } from './state/store.js'
-import { appendMetric, readMetrics, aggregateStats, reliabilityOverrides } from './state/metrics.js'
+import { type LoopResult } from './validator/validation-loop.js'
+import { planTask, prepareDispatch, runTask } from './kernel/kernel.js'
+import { initProject } from './state/store.js'
+import { readMetrics, aggregateStats } from './state/metrics.js'
 import { createHarness } from './harness/harness.js'
 import { type UCP } from './packet/ucp.js'
 import { TEMPLATES, type TemplateKind, openAiTemplate, anthropicTemplate, ollamaTemplate, cliTemplate, httpTemplate, opencodeAdapter, claudeCliAdapter } from './worker/templates.js'
@@ -182,15 +179,6 @@ function printResult(ucp: UCP, result: LoopResult): void {
   }
 }
 
-function buildPlan(task: string, projectRoot: string): { plan: Plan; intent: ReturnType<typeof compileIntent> } {
-  const intent = compileIntent(task)
-  const registry = loadRegistry(projectRoot)
-  const priors = new Map(registry.workers.map(w => [w.id, w.reliability]))
-  const overrides = reliabilityOverrides(projectRoot, priors)
-  const plan = planDispatch(intent, registry, DEFAULT_POLICY, overrides, DEFAULT_BUDGET.retryProbability)
-  return { plan, intent }
-}
-
 async function commandRun(args: CliArgs): Promise<void> {
   if (args.stateDir) process.env['CORTEX_DIR'] = args.stateDir
   const projectRoot = args.dir ?? process.cwd()
@@ -198,62 +186,44 @@ async function commandRun(args: CliArgs): Promise<void> {
   const budget = args.budget ? parseInt(args.budget, 10) : DEFAULT_BUDGET.maxInputTokens
   const timeout = args.timeout ? parseInt(args.timeout, 10) : 180_000
   const budgetConfig: BudgetConfig = { ...DEFAULT_BUDGET, maxInputTokens: budget }
+  const config = { projectRoot, goal, budget: budgetConfig, timeoutMs: timeout }
 
   info(`project: ${projectRoot}`)
   info(`task: ${args.task}`)
   info(`goal: ${goal}`)
 
-  const { plan, intent } = buildPlan(args.task, projectRoot)
-  info(`intent: ${intent.taskType}/${intent.complexity} conf=${intent.confidence.toFixed(2)} caps=${intent.capabilities.join('+')}`)
-
-  const context = compileContext(projectRoot, goal, intent, budgetConfig)
-  for (const escalation of context.escalations) {
-    info(`context: ${escalation}`)
-  }
-
-  if (plan.tier0 || intent.taskType === 'locate') {
-    process.stdout.write(context.pointers.join('\n') + '\n')
+  if (args.dryRun) {
+    const prepared = prepareDispatch(args.task, config)
+    if (prepared.kind === 'pointers') {
+      process.stdout.write(prepared.pointers.join('\n') + '\n')
+      return
+    }
+    if (prepared.kind === 'refused') {
+      logError(`budget refused dispatch: ${prepared.reason}`)
+      process.exit(1)
+    }
+    const prompt = buildPrompt(prepared.ucp, prepared.budgeted.chunks)
+    process.stdout.write(JSON.stringify(prepared.ucp, null, 2) + '\n')
+    process.stdout.write(`\n--- ladder ---\n${prepared.plan.ladder.map(r => `${r.worker.id} (tier ${r.worker.tier}): ${r.justification}`).join('\n')}\n`)
+    process.stdout.write(`\n--- prompt (${prepared.budgeted.totalTokens} est tokens) ---\n${prompt}\n`)
     return
   }
 
-  const previousFacts = loadState(projectRoot).distilledFacts
-  const ucp = generateWorkPacket(args.task, context.chunks, previousFacts)
-  const spendContext = plan.ladder[0] ? { cost: plan.ladder[0].worker.cost } : undefined
-  const budgeted = enforceBudget(ucp, context.chunks, budgetConfig, spendContext)
-
-  if (budgeted.refused) {
-    logError(`budget refused dispatch: ${budgeted.refusedReason}`)
+  const outcome = await runTask(args.task, config)
+  if (outcome.kind === 'pointers') {
+    process.stdout.write(outcome.pointers.join('\n') + '\n')
+    return
+  }
+  if (outcome.kind === 'refused') {
+    logError(`budget refused dispatch: ${outcome.reason}`)
     process.exit(1)
   }
-  if (budgeted.exceeded) {
-    warn(`budget exceeded (${budgeted.totalTokens} > ${budgetConfig.maxInputTokens}) — reduced context`)
-  }
-
-  if (args.dryRun) {
-    const prompt = buildPrompt(budgeted.ucp, budgeted.chunks)
-    process.stdout.write(JSON.stringify(budgeted.ucp, null, 2) + '\n')
-    process.stdout.write(`\n--- ladder ---\n${plan.ladder.map(r => `${r.worker.id} (tier ${r.worker.tier}): ${r.justification}`).join('\n')}\n`)
-    process.stdout.write(`\n--- prompt (${budgeted.totalTokens} est tokens) ---\n${prompt}\n`)
-    return
-  }
-
-  info('starting validation loop...')
-  const result = await runValidationLoop(budgeted.ucp, budgeted.chunks, plan.ladder, projectRoot, {
-    timeoutMs: timeout,
-    maxOutputBytes: 10 * 1024 * 1024,
-    onMetric: (record) => appendMetric(projectRoot, record),
-  })
-
-  for (const artifact of result.artifacts) {
-    saveArtifact(projectRoot, artifact)
-  }
-  updateState(projectRoot, ucp.t, result.patch, budgeted.chunks, result.iterations)
-  printResult(budgeted.ucp, result)
+  printResult(outcome.ucp, outcome.result)
 }
 
 function commandPlan(args: CliArgs): void {
   const projectRoot = args.dir ?? process.cwd()
-  const { plan, intent } = buildPlan(args.task, projectRoot)
+  const { plan, intent } = planTask(args.task, projectRoot)
   process.stdout.write(JSON.stringify({
     intent,
     entryTier: plan.entryTier,
