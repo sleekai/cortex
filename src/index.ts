@@ -23,6 +23,12 @@ import { TEMPLATES, type TemplateKind, openAiTemplate, anthropicTemplate, chatGp
 import { type WorkerSpec } from './worker/registry.js'
 import { normalizeInput as ingressNormalize } from './ingress/ingress.js'
 import { renderDispatchSummary, renderPlanSummary, renderPointerList } from './egress/egress.js'
+// Triage Skill System (CTS) — opt-in pre-execution cognitive filter. The
+// side-effect import registers the built-in skills; runTriage is only called
+// when --triage / CORTEX_TRIAGE is set, so the pipeline is inert by default.
+import './triage/skills/builtins.js'
+import { runTriage } from './triage/pipeline.js'
+import { type CTSPacket } from './triage/packet.js'
 import * as fs from 'node:fs'
 import * as path from 'node:path'
 
@@ -43,6 +49,7 @@ interface CliArgs {
   baseUrl?: string
   bin?: string
   writeAccess?: string
+  triage?: boolean
 }
 
 const COMMANDS = new Set(['run', 'dispatch', 'plan', 'locate', 'workers', 'metrics', 'init', 'add-worker'])
@@ -76,6 +83,8 @@ function parseArgs(raw: string[]): CliArgs {
       args.timeout = raw[++i]!
     } else if (arg === '--dry-run') {
       args.dryRun = true
+    } else if (arg === '--triage') {
+      args.triage = true
     } else if ((arg === '--provider' || arg === '-p') && i + 1 < raw.length) {
       args.provider = raw[++i]!
     } else if ((arg === '--id' || arg === '-n') && i + 1 < raw.length) {
@@ -125,6 +134,7 @@ Options:
   --budget       Max input tokens (default: ${DEFAULT_BUDGET.maxInputTokens})
   --timeout      Worker timeout in ms (default: 180000)
   --dry-run      Print packet + prompt and exit (no model call, no patch)
+  --triage       Run the Triage Skill System first (env: CORTEX_TRIAGE)
   --provider,-p  Worker template (openai, anthropic, ollama, cli, http)
   --id,-n        Worker id (default: derived from provider)
   --model        Model name (for openai/anthropic/ollama templates)
@@ -146,6 +156,21 @@ Examples:
 `)
 }
 
+function triageEnabled(args: CliArgs): boolean {
+  return args.triage === true || !!process.env['CORTEX_TRIAGE']
+}
+
+// Opt-in CTS seam: when enabled, run the triage pipeline and hand its
+// normalized task to the kernel. When disabled, returns args.task unchanged —
+// behaviour is byte-for-byte identical to the pre-CTS path.
+function applyTriage(ingressPacket: ReturnType<typeof ingressNormalize>, args: CliArgs): { task: string; cts?: CTSPacket } {
+  if (!triageEnabled(args)) return { task: args.task }
+  const cts = runTriage(ingressPacket)
+  info(`triage: recommend ${cts.worker_recommendation}, ${cts.subtasks.length} subtask(s), ambiguity ${cts.ambiguity.score.toFixed(2)}`)
+  for (const q of cts.ambiguity.questions) info(`triage clarify: ${q}`)
+  return { task: cts.normalized_task, cts }
+}
+
 async function commandRun(args: CliArgs): Promise<void> {
   if (args.stateDir) process.env['CORTEX_DIR'] = args.stateDir
   const projectRoot = args.dir ?? process.cwd()
@@ -160,15 +185,16 @@ async function commandRun(args: CliArgs): Promise<void> {
     metadata: { projectRoot, budget: String(budget), timeout: String(timeout) },
   })
   const goal = ingressPacket.ucp.g
+  const { task } = applyTriage(ingressPacket, args)
   const config = { projectRoot, goal, budget: budgetConfig, timeoutMs: timeout }
 
   info(`project: ${projectRoot}`)
-  info(`task: ${args.task}`)
+  info(`task: ${task}`)
   info(`goal: ${goal}`)
   info(`source: ${ingressPacket.source} session=${ingressPacket.sessionId ?? 'none'}`)
 
   if (args.dryRun) {
-    const prepared = prepareDispatch(args.task, config)
+    const prepared = prepareDispatch(task, config)
     if (prepared.kind === 'pointers') {
       process.stdout.write(prepared.pointers.join('\n') + '\n')
       return
@@ -184,7 +210,7 @@ async function commandRun(args: CliArgs): Promise<void> {
     return
   }
 
-  const outcome = await runTask(args.task, config)
+  const outcome = await runTask(task, config)
   if (outcome.kind === 'pointers') {
     process.stdout.write(renderPointerList(outcome.pointers, { targetKind: 'cli' }) + '\n')
     return
@@ -214,7 +240,8 @@ async function commandRun(args: CliArgs): Promise<void> {
 function commandPlan(args: CliArgs): void {
   const projectRoot = args.dir ?? process.cwd()
   const ingressPacket = ingressNormalize({ content: args.task, kind: 'cli', explicitGoal: args.goal })
-  const { plan, intent } = planTask(args.task, projectRoot)
+  const { task, cts } = applyTriage(ingressPacket, args)
+  const { plan, intent } = planTask(task, projectRoot)
   const data = {
     intent,
     entryTier: plan.entryTier,
@@ -232,6 +259,7 @@ function commandPlan(args: CliArgs): void {
       sessionId: ingressPacket.sessionId,
       preClassified: ingressPacket.preClassified,
     },
+    ...(cts ? { _triage: cts } : {}),
   }
   process.stdout.write(renderPlanSummary(data, { targetKind: 'cli' }) + '\n')
 }
