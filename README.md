@@ -5,6 +5,7 @@ Model-agnostic, harness-agnostic, protocol-agnostic dispatch kernel for AI workl
 ```bash
 npm install @sleekai/cortex
 npx cortex init            # scaffold .cortex/ state directory
+npx cortex add-worker      # register a worker (interactive; or --provider)
 npx cortex dispatch "task" # dispatch to best available worker
 npx cortex plan "task"     # preview dispatch plan, zero model calls
 npx cortex locate "query"  # deterministic code pointers, zero model calls
@@ -29,12 +30,23 @@ Task → Intent Compiler → Capability Planner → Context Compiler
       → UCP v2 Packet → Budget Controller → Harness → Validated Output
 ```
 
+The pipeline lives in one place — the **kernel** (`src/kernel/kernel.ts`:
+`planTask` / `prepareDispatch` / `runTask`). The CLI and the MCP server are
+thin surfaces over it; every surface persists artifacts, state, and metrics
+identically.
+
 - **Intent compiler** — deterministic regex-based classifier (zero model calls)
 - **Capability planner** — expected-utility ladder (EU = quality × reliability / cost × latency)
 - **Progressive context compiler** — 5 levels (L0 file names → L4 full source), budget-aware
 - **UCP v2** — Ultra-Compact Packet grammar, versioned, single-letter keys
 - **Worker registry** — JSON data, not privileged code; project overlays
 - **Validation loop** — apply → hooks → error-only retry, max 3 iterations
+- **DAG executor** — dependency-ordered parallel dispatch with checkpointing,
+  resume (settled nodes never re-run), and cooperative cancellation
+
+See [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md) for subsystem designs and
+[docs/AUDIT.md](./docs/AUDIT.md) for the repository audit, gap analysis, and
+deliberate deferrals.
 
 ## Commands
 
@@ -46,8 +58,34 @@ Task → Intent Compiler → Capability Planner → Context Compiler
 | `cortex locate <query>` | Deterministic code pointers |
 | `cortex workers` | List registered workers |
 | `cortex metrics` | Per-worker reliability stats |
+| `cortex add-worker [provider]` | Register a worker from a template |
 
 `cortex run` is an alias for `cortex dispatch`.
+
+### Adding workers
+
+Interactive with no flags, or one-shot:
+
+```bash
+cortex add-worker opencode                          # zero-config adapter
+cortex add-worker claude-cli                        # zero-config adapter
+cortex add-worker openai --model gpt-4o-mini --id openai-cheap
+cortex add-worker anthropic --model claude-sonnet-4-20250514
+cortex add-worker ollama --model llama3.2 --base-url http://localhost:11434
+cortex add-worker cli --id my-llamafile --bin ./llamafile
+```
+
+Workers land in `.cortex/workers.json` — data, hot-swappable, no kernel code.
+
+## MCP Server
+
+`cortex-mcp` (stdio) exposes the kernel to any MCP client: `cortex_plan`,
+`cortex_locate`, `cortex_workers`, `cortex_metrics`, `cortex_dispatch`,
+`cortex_init`, plus a `cortex://registry` resource.
+
+```json
+{ "mcpServers": { "cortex": { "command": "npx", "args": ["cortex-mcp"] } } }
+```
 
 ## Configuration
 
@@ -56,6 +94,9 @@ Task → Intent Compiler → Capability Planner → Context Compiler
 - **`.cortex/workers.json`** — project-local worker registry overlay
 - **`.cortex/state.json`** — distilled facts, no history
 - **`.cortex/metrics.jsonl`** — append-only dispatch records
+- **`.cortex/artifacts/<taskId>/`** — persisted typed artifacts per task
+- **`.cortex/runs/<runId>.json`** — execution-graph checkpoints (non-failure
+  node results; failed or cancelled nodes re-run on resume)
 
 ## UCP v2 Packet Format
 
