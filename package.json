@@ -7,7 +7,8 @@
     "cortex": "dist/index.js",
     "cx": "dist/index.js",
     "ucp": "dist/index.js",
-    "cortex-mcp": "dist/mcp-server.js"
+    "cortex-mcp": "dist/mcp-server.js",
+    "cortex-install-skill": "skills/install.js"
   },
   "publishConfig": {
     "access": "public"
