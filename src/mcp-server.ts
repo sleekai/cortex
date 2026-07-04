@@ -17,6 +17,9 @@ import { readMetrics, aggregateStats } from './state/metrics.js'
 import { createHarness } from './harness/harness.js'
 import { normalizeInput as ingressNormalize } from './ingress/ingress.js'
 import { renderPlanSummary, renderPointerList } from './egress/egress.js'
+// Triage Skill System (CTS) — opt-in per-call via the `triage` argument.
+import './triage/skills/builtins.js'
+import { runTriage } from './triage/pipeline.js'
 
 const server = new McpServer({
   name: 'cortex',
@@ -31,20 +34,29 @@ const server = new McpServer({
 const taskSchema = { task: z.string().describe('Task description (e.g. "add JWT auth to Express app")') }
 const goalSchema = { goal: z.string().optional().describe('Optional goal keywords (derived from task if omitted)') }
 const dirSchema = { dir: z.string().optional().describe('Project root directory (default: cwd)') }
+const triageSchema = { triage: z.boolean().optional().describe('Run the Triage Skill System first (normalize + structure the task before intent compilation)') }
 
 function resolveDir(dir?: string): string {
   return dir ?? process.cwd()
 }
 
+// Opt-in CTS seam: normalize the task via triage when requested, else pass the
+// raw task through unchanged (byte-for-byte identical to the pre-CTS path).
+function applyTriage(ingressPacket: ReturnType<typeof ingressNormalize>, rawTask: string, enabled?: boolean): string {
+  return enabled ? runTriage(ingressPacket).normalized_task : rawTask
+}
+
 server.registerTool('cortex_plan', {
   title: 'cortex-plan',
   description: 'Compile intent and show dispatch plan. Read-only — no model calls, no side effects.',
-  inputSchema: { ...taskSchema, ...goalSchema, ...dirSchema },
+  inputSchema: { ...taskSchema, ...goalSchema, ...dirSchema, ...triageSchema },
 }, (args) => {
   try {
     const projectRoot = resolveDir(args.dir)
     const ingressPacket = ingressNormalize({ content: args.task, kind: 'mcp', explicitGoal: args.goal, metadata: { projectRoot } })
-    const { intent, plan } = planTask(args.task, projectRoot)
+    const cts = args.triage ? runTriage(ingressPacket) : undefined
+    const task = cts ? cts.normalized_task : args.task
+    const { intent, plan } = planTask(task, projectRoot)
     const data = {
       intent,
       plan,
@@ -53,6 +65,7 @@ server.registerTool('cortex_plan', {
         sessionId: ingressPacket.sessionId,
         preClassified: ingressPacket.preClassified,
       },
+      ...(cts ? { _triage: cts } : {}),
     }
     return { content: [{ type: 'text', text: renderPlanSummary(data, { targetKind: 'mcp' }) }] }
   } catch (e: unknown) {
@@ -143,6 +156,7 @@ server.registerTool('cortex_dispatch', {
     budget: z.number().optional().describe('Max input tokens (default: 2500)'),
     timeout: z.number().optional().describe('Worker timeout in ms (default: 180000)'),
     dry_run: z.boolean().optional().describe('Print packet + prompt and exit without executing'),
+    ...triageSchema,
   },
 }, async (args) => {
   try {
@@ -156,6 +170,7 @@ server.registerTool('cortex_dispatch', {
       explicitGoal: args.goal,
       metadata: { projectRoot, budget: String(budget) },
     })
+    const task = applyTriage(ingressPacket, args.task, args.triage)
     const config = {
       projectRoot,
       goal: ingressPacket.ucp.g,
@@ -164,7 +179,7 @@ server.registerTool('cortex_dispatch', {
     }
 
     if (args.dry_run) {
-      const prepared = prepareDispatch(args.task, config)
+      const prepared = prepareDispatch(task, config)
       if (prepared.kind === 'pointers') {
         return { content: [{ type: 'text', text: renderPointerList(prepared.pointers, { targetKind: 'mcp' }) }] }
       }
@@ -180,7 +195,7 @@ server.registerTool('cortex_dispatch', {
       ]}
     }
 
-    const outcome = await runTask(args.task, config)
+    const outcome = await runTask(task, config)
     if (outcome.kind === 'pointers') {
       return { content: [{ type: 'text', text: renderPointerList(outcome.pointers, { targetKind: 'mcp' }) }] }
     }

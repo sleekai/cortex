@@ -1,0 +1,45 @@
+import { test } from 'node:test'
+import * as assert from 'node:assert/strict'
+import { routingSkill } from '../src/triage/skills/routing.js'
+import { emptyPacket, ALL_TIERS } from '../src/triage/packet.js'
+import { type UCP } from '../src/packet/ucp.js'
+import { DEFAULT_TRIAGE_POLICY, type TriageContext } from '../src/triage/skill.js'
+
+function ctx(normalized: string, score = 1, subtaskCount = 1): TriageContext {
+  const ucp: UCP = { v: 2, t: 't1', act: 'work', g: normalized, c: [], ctx: { f: [], d: [] }, r: { out: 'patch', format: 'text' } }
+  const draft = emptyPacket()
+  draft.normalized_task = normalized
+  draft.ambiguity = { score, flags: [], questions: [] }
+  draft.subtasks = Array.from({ length: subtaskCount }, (_, i) => ({ id: `st${i + 1}`, description: 'x', dependencies: [], type: 'required' as const }))
+  return { ucp, raw: normalized, draft, policy: DEFAULT_TRIAGE_POLICY }
+}
+
+function rec(...args: Parameters<typeof ctx>): string {
+  return routingSkill.execute(ctx(...args)).patch.worker_recommendation!
+}
+
+test('recommendation is always a valid tier', () => {
+  assert.ok((ALL_TIERS as readonly string[]).includes(rec('fix the bug in a.ts')))
+})
+
+test('browser / human work routes to T4', () => {
+  assert.equal(rec('log in to the dashboard in a browser and take a screenshot'), 'T4')
+})
+
+test('open-ended work routes to T3', () => {
+  assert.equal(rec('migrate the entire codebase across all packages', 1, 6), 'T3')
+})
+
+test('small clear single-file task routes to a low tier', () => {
+  assert.equal(rec('fix the null check and update the tests in src/auth.ts', 1, 2), 'T1')
+})
+
+test('pure lookup routes to T0', () => {
+  assert.equal(rec('find where budget enforcement happens'), 'T0')
+})
+
+test('high ambiguity raises the tier', () => {
+  const clear = rec('update the config in server.ts', 1, 2)
+  const murky = rec('update the config in server.ts', 0.3, 2)
+  assert.notEqual(clear, murky)
+})
