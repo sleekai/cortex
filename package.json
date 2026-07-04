@@ -13,11 +13,11 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/hmon/cortex.git"
+    "url": "git+https://github.com/sleekstack/cortex.git"
   },
-  "homepage": "https://github.com/hmon/cortex#readme",
+  "homepage": "https://github.com/sleekstack/cortex#readme",
   "bugs": {
-    "url": "https://github.com/hmon/cortex/issues"
+    "url": "https://github.com/sleekstack/cortex/issues"
   },
   "keywords": [
     "ai",
