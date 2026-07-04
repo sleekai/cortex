@@ -12,9 +12,13 @@ implicit becomes explicit and typed.
 
 Status (2026-07): phases 1–5 below are implemented and tested. The kernel is
 extracted (`src/kernel/kernel.ts`); the DAG executor supports checkpointing,
-resume, and cooperative cancellation. `docs/AUDIT.md` §4 records what is
-deliberately deferred and why (call/dependency-graph retrieval, embeddings,
-additional protocol harnesses, a persistent repository index).
+resume, and cooperative cancellation. A state-graph layer (`src/graph/`) adds
+dynamic control flow above dispatch — reducer channels, conditional routing,
+Send fan-out, bounded cycles, interrupt/resume — adopting LangGraph's proven
+ideas without its dependencies (see "State graph" below). `docs/AUDIT.md` §4
+records what is deliberately deferred and why (call/dependency-graph
+retrieval, embeddings, additional protocol harnesses, a persistent repository
+index).
 
 ## Deviations from the vNext specification (deliberate)
 
@@ -68,6 +72,11 @@ skills/ucp-toolchain/implementation/   (package: cortex)
       harness.ts        Harness interface + registry of harness factories
       cli-harness.ts    generic process harness (claude-adapter generalized)
       http-harness.ts   generic JSON-over-HTTP harness
+    graph/
+      channels.ts       reducer channels: shared state with declared merge semantics
+      state-graph.ts    graph builder: nodes, edges, routers, Send, goto
+      executor.ts       superstep executor: cycles, interrupts, checkpoints
+      packet-node.ts    bridge: dispatchWithLadder as a graph node
     retrieval/          kept: ast-parser, embedder (TF-IDF), git-priority
       context-compiler.ts  progressive levels over the existing retrieval
     validator/          kept: patch-apply, validation-loop (worker-agnostic now)
@@ -230,6 +239,45 @@ are restored without re-dispatch — partial recomputation), `onNodeComplete`
 in-flight harness calls drain, and cancelled nodes settle as *recoverable*
 failures so a resume re-runs them. True mid-call abort would need harness
 support and is deferred until a harness can honor it.
+
+### State graph (`graph/`)
+
+Dynamic control flow above the dispatch planner, adopted from LangGraph's
+good parts and rebuilt Cortex-idiomatic (deterministic, zero dependencies,
+artifact-first):
+
+- **Reducer channels** (`channels.ts`) — shared state as declared channels,
+  each with a merge reducer (`lastValue`, `appendList`, `mapMerge`, custom).
+  Parallel nodes never race: the executor applies their updates through the
+  reducers in node-id-sorted order, so runs are reproducible regardless of
+  completion timing. Channel values must stay JSON-serializable.
+- **State graph builder** (`state-graph.ts`) — `stateGraph(channels)
+  .addNode().addEdge().addConditionalEdges().compile()`. Conditional routers
+  inspect merged state at runtime; a node may override its outgoing edges per
+  run (Command-style `goto`); `send(node, input)` schedules dynamic fan-out —
+  one task per payload, map-reduce with a reducer channel as the join. Cycles
+  are legal.
+- **Superstep executor** (`executor.ts`) — Pregel-style: run the frontier
+  concurrently (bounded), merge updates, route the next frontier. A
+  checkpoint (`{ step, state, frontier, interrupted }`) is snapshotted before
+  every superstep, so `failed`, `cancelled`, `exhausted` (recursion limit,
+  default 25 supersteps), and `interrupted` outcomes all carry a resumable
+  snapshot — time travel is resuming from an earlier one. `interrupt` is the
+  human-in-the-loop seam: the node pauses the run (peers still settle),
+  `resumeGraph(graph, checkpoint, value)` re-runs it with `ctx.resume` set.
+  `onEvent` streams superstep/node lifecycle; `onCheckpoint` is the
+  persistence seam (wire to `state/store`).
+- **Packet bridge** (`packet-node.ts`) — `packetNode()` wraps
+  `dispatchWithLadder` as a graph node (escalation, metrics, and artifact
+  parsing unchanged); `packetChannels()` provides the `artifacts` append
+  channel and `results` map channel. One dispatch implementation, two
+  frontends: static `DispatchPlan`s keep using `executePlan`; graphs that
+  need runtime routing, loops, fan-out, or human gates use the state graph.
+
+Deliberately not adopted from LangGraph: checkpointer backends (the state
+engine owns persistence), thread ids (a checkpoint is a plain JSON value),
+and runnable/message abstractions (a node is a function; artifacts are the
+currency).
 
 ### State engine & learning (`state/`)
 

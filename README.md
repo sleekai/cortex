@@ -43,6 +43,9 @@ identically.
 - **Validation loop** — apply → hooks → error-only retry, max 3 iterations
 - **DAG executor** — dependency-ordered parallel dispatch with checkpointing,
   resume (settled nodes never re-run), and cooperative cancellation
+- **State graph** — dynamic control flow above dispatch: reducer channels,
+  conditional edges, Send fan-out (map-reduce), bounded cycles, and
+  interrupt/resume for human-in-the-loop — checkpointed every superstep
 
 See [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md) for subsystem designs and
 [docs/AUDIT.md](./docs/AUDIT.md) for the repository audit, gap analysis, and
@@ -86,6 +89,41 @@ Workers land in `.cortex/workers.json` — data, hot-swappable, no kernel code.
 ```json
 { "mcpServers": { "cortex": { "command": "npx", "args": ["cortex-mcp"] } } }
 ```
+
+## State Graphs
+
+For work that a static DAG can't express — runtime routing, retry loops,
+dynamic fan-out, human approval gates — build a state graph (`src/graph/`).
+Nodes share state through reducer channels, so parallel branches merge
+deterministically; every superstep is checkpointed, so any outcome
+(interrupt, failure, cancellation, recursion limit) resumes from a snapshot.
+
+```ts
+import { stateGraph, send, START, END } from '@sleekai/cortex/dist/graph/state-graph.js'
+import { runGraph, resumeGraph } from '@sleekai/cortex/dist/graph/executor.js'
+import { lastValue, appendList } from '@sleekai/cortex/dist/graph/channels.js'
+
+const graph = stateGraph({ items: lastValue<string[]>([]), findings: appendList<string>() })
+  .addNode('plan', ctx => ({ goto: (ctx.state.items as string[]).map(f => send('scan', f)) }))
+  .addNode('scan', ctx => ({ update: { findings: [`scanned ${ctx.input}`] } }))
+  .addNode('gate', ctx => ctx.resume === undefined
+    ? { interrupt: { reason: 'approve findings?' } }        // pause for a human
+    : { update: {} })
+  .addEdge(START, 'plan')
+  .addEdge('scan', 'gate')   // Send instances fan back into one gate run
+  .addEdge('gate', END)
+  .compile()
+
+const paused = await runGraph(graph, { items: ['a.ts', 'b.ts'] })
+if (paused.status === 'interrupted') {
+  const done = await resumeGraph(graph, paused.checkpoint, 'approved')
+}
+```
+
+`packetNode()` (`graph/packet-node.ts`) wraps the standard dispatch path
+(escalation ladder, metrics, artifacts) as a graph node, so model-backed
+steps and plain-function steps compose in one graph. Cycles are legal and
+bounded by a recursion limit (default 25 supersteps).
 
 ## Configuration
 

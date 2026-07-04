@@ -4,13 +4,17 @@ Status audit of the repository against the Cortex vision (capability-driven AI
 orchestration kernel: model-, harness-, protocol-agnostic; artifact-driven;
 cost/token-aware; observable; extensible). Referenced by `ARCHITECTURE.md`.
 
-Verdict up front: **the migration described in `ARCHITECTURE.md` is largely
-complete.** Phases 1–7 of the canonical roadmap are implemented and tested
-(67 tests green at v2.0.1). What remains is completion work, not
-transformation: the kernel exists but is duplicated across two entry points
-instead of extracted; the DAG executor exists but lacks checkpointing, resume,
-and cancellation; several roadmap items are deliberately deferred and the
-deferrals are documented here with their tradeoffs.
+Verdict up front: **the migration described in `ARCHITECTURE.md` is
+complete.** All ten phases of the canonical roadmap are implemented and
+tested (95 tests green past v2.1.0). The two gaps this audit originally
+flagged are closed: the kernel is extracted to `src/kernel/kernel.ts` (both
+entry points are thin surfaces over it), and the DAG executor has
+checkpointing, resume, and cooperative cancellation. Since then a state-graph
+layer (`src/graph/`) was added above dispatch: reducer channels, conditional
+routing, Send fan-out, bounded cycles, and interrupt/resume — LangGraph's
+proven control-flow ideas rebuilt dependency-free on the existing dispatch
+path. Several roadmap items remain deliberately deferred; the deferrals are
+documented here with their tradeoffs.
 
 ---
 
@@ -18,17 +22,18 @@ deferrals are documented here with their tradeoffs.
 
 ```
                     ┌──────────────┐      ┌───────────────┐
-   entry points →   │ index.ts CLI │      │ mcp-server.ts │   ← both re-implement
-                    └──────┬───────┘      └───────┬───────┘     the same pipeline
-                           └────────┬─────────────┘             (THE gap)
+   entry points →   │ index.ts CLI │      │ mcp-server.ts │   ← thin surfaces
+                    └──────┬───────┘      └───────┬───────┘     over the kernel
+                           └────────┬─────────────┘
                                     ▼
         ┌───────────────────────────────────────────────────┐
-        │ orchestration pipeline (currently inline, twice): │
-        │  compileIntent → loadRegistry → reliability-       │
-        │  Overrides → planDispatch → compileContext →       │
-        │  generateWorkPacket → enforceBudget →              │
-        │  runValidationLoop → saveArtifact/updateState/     │
-        │  appendMetric                                      │
+        │ kernel/kernel.ts (the one pipeline):               │
+        │  planTask: compileIntent → loadRegistry →          │
+        │   reliabilityOverrides → planDispatch              │
+        │  prepareDispatch: + compileContext →               │
+        │   generateWorkPacket → enforceBudget               │
+        │  runTask: + runValidationLoop →                    │
+        │   saveArtifact/updateState/appendMetric            │
         └───────────────────────────────────────────────────┘
              │            │            │            │
              ▼            ▼            ▼            ▼
@@ -76,30 +81,28 @@ error-only retry ≤3) → artifacts + state + metrics persisted.
 | `packet/` UCP v2 + generator + budget | versioned, v1-compatible read, degrade cascade, spend refuse | **keep unchanged** |
 | `capability/` vocabulary, intent compiler, EU planner, policy | deterministic classifier w/ confidence; EU = q·rel·speed/spend; ladder + tier-0 short-circuit | **keep unchanged** |
 | `worker/registry` JSON specs + overlay | hot-swap via `.cortex/workers.json`, validation, env overrides, `disabled` retirement | **keep unchanged** |
-| `worker/dispatch` ladder + DAG executor | ladder walk solid; `executePlan` DAG runs parallel w/ fan-in short-circuit but **no checkpoint/resume/cancel, and no production caller** | **refactor (complete it)** |
+| `worker/dispatch` ladder + DAG executor | ladder walk solid; `executePlan` runs parallel w/ fan-in short-circuit, checkpoint/resume (`resumeFrom`, `onNodeComplete`), cooperative cancel | **keep** (was: refactor — completed) |
 | `harness/` seam + cli/http | factory registry; planner never sees execution detail | **keep; extend by registration only** |
+| `graph/` state graph over dispatch | reducer channels, conditional edges, Send fan-out, bounded cycles, interrupt/resume, per-superstep checkpoints; `packetNode` reuses `dispatchWithLadder` | **keep; added post-audit** |
 | `retrieval/` AST, TF-IDF, git-recency, L0–L4 compiler | deterministic, budget-gated escalation | **keep; escalation trigger is narrow (see §4)** |
 | `validator/` patch-apply + loop | error-only retry packets (tested invariant) | **keep unchanged** |
 | `state/` store + metrics | `.cortex/` engine, legacy migration, JSONL learning loop → planner priors | **keep; add run checkpoints** |
-| `index.ts` (557 lines) | CLI + **inlined orchestration** + interactive prompts | **extract** pipeline → `kernel/` |
-| `mcp-server.ts` (262 lines) | MCP surface + **second copy** of orchestration | **extract**; fix drift |
+| `index.ts` | CLI surface over `kernel/kernel.ts` | **done** — pipeline extracted |
+| `mcp-server.ts` | MCP surface over the same kernel; persistence drift fixed | **done** — pipeline extracted |
 | `dist/`, `dist-test/` | build artifacts on disk | gitignored, untracked — no action |
 
 Nothing qualifies for **remove** in source. Nothing is dead code.
 
 ## 3. Technical debt inventory (ranked)
 
-1. **Kernel duplication (highest).** `index.ts:commandRun` and
-   `mcp-server.ts:cortex_dispatch` each inline the full pipeline. Already
-   diverged: the MCP path **does not persist artifacts and does not update
-   state** after a dispatch; the CLI path does. Same for plan construction
-   (duplicated `buildPlan` logic). This is Phase 10 (kernel activation) left
-   unfinished — the kernel exists as a code path, not as a module.
-2. **DAG executor is dark launched.** `executePlan` is implemented and tested
-   but no entry point constructs multi-node plans; the validation loop calls
-   `dispatchWithLadder` directly. Fine per Rule 4 (shadow mode), but the
-   directive's Phase 8 requirements — checkpointing, replay, partial
-   recomputation, cancellation — are absent.
+1. ~~**Kernel duplication.**~~ **Resolved** — pipeline extracted to
+   `src/kernel/kernel.ts`; `index.ts` and `mcp-server.ts` are thin surfaces;
+   MCP dispatch now persists artifacts and state like the CLI.
+2. ~~**DAG executor incomplete.**~~ **Resolved** — `executePlan` has
+   `resumeFrom` (replay/partial recomputation), `onNodeComplete`
+   (checkpointing), and `AbortSignal` cancellation. Multi-node plans remain
+   caller-constructed; the state graph (`src/graph/`) is the dynamic
+   frontend for runtime routing, loops, fan-out, and human gates.
 3. **Context escalation trigger is narrow.** Escalates only when a level
    yields zero chunks. A patch task with *weakly relevant* chunks never climbs.
    Acceptable v1 heuristic; needs a retrieval-quality metric before widening
@@ -121,9 +124,9 @@ Nothing qualifies for **remove** in source. Nothing is dead code.
 | 5 Capability system | capability-centric execution | **done** | `capability/*`; planner never sees raw text |
 | 6 Worker abstraction | registry, hot-swap, profiles | **done** | `worker/registry.ts` + JSON overlay + harness seam |
 | 7 Economic scheduler | utility optimization | **done** | `capability/planner.ts` EU scoring + spend gate + ladder |
-| 8 Execution graphs | DAG + retries + cancel + checkpoint + replay | **partial** | DAG + retries exist; checkpoint/resume/cancel missing → **this migration** |
+| 8 Execution graphs | DAG + retries + cancel + checkpoint + replay | **done** | `worker/dispatch.ts` executePlan (static DAG); `graph/` state graph adds dynamic routing, cycles, fan-out, interrupt/resume |
 | 9 Progressive escalation | expand only when justified | **partial** | budget-gated climb exists; trigger narrow (§3.3) → deferred pending retrieval-quality metric |
-| 10 Kernel activation | kernel owns planning/scheduling/budget/policy | **partial** | logic exists, module doesn't → **this migration** |
+| 10 Kernel activation | kernel owns planning/scheduling/budget/policy | **done** | `kernel/kernel.ts`: planTask / prepareDispatch / runTask; CLI and MCP are surfaces |
 
 Directive items **deliberately deferred**, with tradeoffs (Rule 6):
 
@@ -150,7 +153,13 @@ Directive items **deliberately deferred**, with tradeoffs (Rule 6):
 - **Daemon/scheduler-as-a-service.** Statelessness-by-construction is the
   repo's strongest property (ARCHITECTURE.md deviation 2). Unchanged.
 
-## 5. Migration plan (this iteration)
+## 5. Migration plan (this iteration) — **shipped**
+
+Both steps below are implemented and tested (see §2/§4). A third increment
+followed: the state graph (`src/graph/`) — reducer channels, conditional
+edges, Send fan-out, bounded cycles, interrupt/resume, per-superstep
+checkpoints — layered on `dispatchWithLadder` without touching existing
+callers. The plan is kept for the record.
 
 Both steps obey the rules: incremental, runnable after each commit, tested,
 old paths preserved.
