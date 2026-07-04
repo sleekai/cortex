@@ -5,10 +5,18 @@ import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
 
+// Workers often emit stale or invented function context after the closing
+// `@@` of a hunk header; git/patch only need the line numbers, so stripping
+// the context is safer than attempting to repair it.
+function stripHunkContext(patch: string): string {
+  return patch.replace(/^(@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @@).*$/gm, '$1')
+}
+
 export function applyPatch(patch: string, projectRoot: string): boolean {
   const patchPath = path.join(os.tmpdir(), `ucp-apply-${Date.now()}.patch`)
+  const sanitized = stripHunkContext(patch)
   // git apply requires a trailing newline on the last hunk line
-  fs.writeFileSync(patchPath, patch.endsWith('\n') ? patch : patch + '\n', 'utf-8')
+  fs.writeFileSync(patchPath, sanitized.endsWith('\n') ? sanitized : sanitized + '\n', 'utf-8')
 
   const attempts = [
     `git apply --whitespace=fix "${patchPath}"`,
