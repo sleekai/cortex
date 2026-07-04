@@ -15,14 +15,14 @@ import { compileIntent } from './capability/intent-compiler.js'
 import { loadRegistry } from './worker/registry.js'
 import { compileContext } from './retrieval/context-compiler.js'
 import { buildPrompt } from './worker/prompt.js'
-import { type LoopResult } from './validator/validation-loop.js'
 import { planTask, prepareDispatch, runTask } from './kernel/kernel.js'
 import { initProject } from './state/store.js'
 import { readMetrics, aggregateStats } from './state/metrics.js'
 import { createHarness } from './harness/harness.js'
-import { type UCP } from './packet/ucp.js'
-import { TEMPLATES, type TemplateKind, openAiTemplate, anthropicTemplate, ollamaTemplate, cliTemplate, httpTemplate, opencodeAdapter, claudeCliAdapter } from './worker/templates.js'
+import { TEMPLATES, type TemplateKind, openAiTemplate, anthropicTemplate, chatGptTemplate, ollamaTemplate, cliTemplate, httpTemplate, opencodeAdapter, claudeCliAdapter } from './worker/templates.js'
 import { type WorkerSpec } from './worker/registry.js'
+import { normalizeInput as ingressNormalize } from './ingress/ingress.js'
+import { renderDispatchSummary, renderPlanSummary, renderPointerList } from './egress/egress.js'
 import * as fs from 'node:fs'
 import * as path from 'node:path'
 
@@ -146,51 +146,26 @@ Examples:
 `)
 }
 
-function printResult(ucp: UCP, result: LoopResult): void {
-  const verdict = result.success ? 'PASS' : 'FAIL'
-  const border = '═'.repeat(60)
-
-  const output: string[] = [
-    '',
-    border,
-    `  CORTEX RESULT: ${verdict}`,
-    border,
-    `  Task:    ${ucp.t}`,
-    `  Goal:    ${ucp.g}`,
-    `  Iter:    ${result.iterations}`,
-    '',
-    `  Patch:   ${result.patch ? `${result.patch.length} chars` : 'none'}`,
-    `  Reason:  ${result.reasoning || 'none'}`,
-    `  Hooks:   ${result.validation.passed ? 'passed' : 'FAILED'}`,
-  ]
-
-  if (result.validation.errors.length > 0) {
-    output.push('', '  Errors:')
-    for (const e of result.validation.errors) {
-      output.push(`    - ${e}`)
-    }
-  }
-
-  output.push(border, '')
-  process.stdout.write(output.join('\n'))
-
-  if (!result.success) {
-    process.exit(1)
-  }
-}
-
 async function commandRun(args: CliArgs): Promise<void> {
   if (args.stateDir) process.env['CORTEX_DIR'] = args.stateDir
   const projectRoot = args.dir ?? process.cwd()
-  const goal = args.goal ?? args.task
   const budget = args.budget ? parseInt(args.budget, 10) : DEFAULT_BUDGET.maxInputTokens
   const timeout = args.timeout ? parseInt(args.timeout, 10) : 180_000
   const budgetConfig: BudgetConfig = { ...DEFAULT_BUDGET, maxInputTokens: budget }
+
+  const ingressPacket = ingressNormalize({
+    content: args.task,
+    kind: 'cli',
+    explicitGoal: args.goal,
+    metadata: { projectRoot, budget: String(budget), timeout: String(timeout) },
+  })
+  const goal = ingressPacket.ucp.g
   const config = { projectRoot, goal, budget: budgetConfig, timeoutMs: timeout }
 
   info(`project: ${projectRoot}`)
   info(`task: ${args.task}`)
   info(`goal: ${goal}`)
+  info(`source: ${ingressPacket.source} session=${ingressPacket.sessionId ?? 'none'}`)
 
   if (args.dryRun) {
     const prepared = prepareDispatch(args.task, config)
@@ -211,20 +186,36 @@ async function commandRun(args: CliArgs): Promise<void> {
 
   const outcome = await runTask(args.task, config)
   if (outcome.kind === 'pointers') {
-    process.stdout.write(outcome.pointers.join('\n') + '\n')
+    process.stdout.write(renderPointerList(outcome.pointers, { targetKind: 'cli' }) + '\n')
     return
   }
   if (outcome.kind === 'refused') {
     logError(`budget refused dispatch: ${outcome.reason}`)
     process.exit(1)
   }
-  printResult(outcome.ucp, outcome.result)
+  const summary = {
+    kind: outcome.kind,
+    taskId: outcome.ucp.t,
+    goal: outcome.ucp.g,
+    success: outcome.result.success,
+    iterations: outcome.result.iterations,
+    patchLength: outcome.result.patch.length,
+    reasoning: outcome.result.reasoning || 'none',
+    validationPassed: outcome.result.validation.passed,
+    validationErrors: outcome.result.validation.errors,
+  }
+  const egressOut = renderDispatchSummary(summary, { targetKind: 'cli' })
+  process.stdout.write(egressOut)
+  if (!outcome.result.success) {
+    process.exit(1)
+  }
 }
 
 function commandPlan(args: CliArgs): void {
   const projectRoot = args.dir ?? process.cwd()
+  const ingressPacket = ingressNormalize({ content: args.task, kind: 'cli', explicitGoal: args.goal })
   const { plan, intent } = planTask(args.task, projectRoot)
-  process.stdout.write(JSON.stringify({
+  const data = {
     intent,
     entryTier: plan.entryTier,
     tier0: plan.tier0,
@@ -236,14 +227,21 @@ function commandPlan(args: CliArgs): void {
       justification: r.justification,
     })),
     excluded: plan.excluded,
-  }, null, 2) + '\n')
+    _ingress: {
+      source: ingressPacket.source,
+      sessionId: ingressPacket.sessionId,
+      preClassified: ingressPacket.preClassified,
+    },
+  }
+  process.stdout.write(renderPlanSummary(data, { targetKind: 'cli' }) + '\n')
 }
 
 function commandLocate(args: CliArgs): void {
   const projectRoot = args.dir ?? process.cwd()
+  const ingressPacket = ingressNormalize({ content: args.task, kind: 'cli', explicitGoal: args.goal })
   const intent = { ...compileIntent(args.task), taskType: 'locate' as const }
-  const context = compileContext(projectRoot, args.goal ?? args.task, intent, DEFAULT_BUDGET)
-  process.stdout.write(context.pointers.join('\n') + '\n')
+  const context = compileContext(projectRoot, ingressPacket.ucp.g, intent, DEFAULT_BUDGET)
+  process.stdout.write(renderPointerList(context.pointers, { targetKind: 'cli' }) + '\n')
 }
 
 function commandWorkers(args: CliArgs): void {
@@ -348,6 +346,17 @@ async function promptAnthropic(rli: readline.Interface): Promise<WorkerSpec> {
   })
 }
 
+async function promptChatGpt(rli: readline.Interface): Promise<WorkerSpec> {
+  const id = await ask(rli, 'Worker id', 'chatgpt')
+  const model = await ask(rli, 'Model', 'gpt-4o')
+  const keyHint = process.env['CHATGPT_API_KEY'] || process.env['OPENAI_API_KEY'] ? '<from env>' : ''
+  const apiKey = await ask(rli, 'API key (leave empty to skip)', keyHint) || undefined
+  return chatGptTemplate({
+    id, model, apiKey,
+    writeAccess: await pick(rli, 'Write access', ['patch', 'none']) as 'patch' | 'none',
+  })
+}
+
 async function promptOllama(rli: readline.Interface): Promise<WorkerSpec> {
   const id = await ask(rli, 'Worker id', 'ollama')
   const model = await ask(rli, 'Model', 'llama3.2')
@@ -414,6 +423,11 @@ function buildSpecFromFlags(args: CliArgs): WorkerSpec {
         id: workerId, model: args.model, apiKey: args.apiKey,
         writeAccess: (args.writeAccess as 'none' | 'patch') ?? 'patch',
       })
+    case 'chatgpt':
+      return chatGptTemplate({
+        id: workerId, model: args.model, apiKey: args.apiKey,
+        writeAccess: (args.writeAccess as 'none' | 'patch') ?? 'patch',
+      })
     case 'ollama':
       return ollamaTemplate({
         id: workerId, model: args.model, baseUrl: args.baseUrl,
@@ -421,12 +435,12 @@ function buildSpecFromFlags(args: CliArgs): WorkerSpec {
       })
     case 'opencode':
       return opencodeAdapter({
-        id: workerId,
+        id: workerId, model: args.model,
         writeAccess: (args.writeAccess as 'none' | 'patch') ?? 'patch',
       })
     case 'claude-cli':
       return claudeCliAdapter({
-        id: workerId,
+        id: workerId, model: args.model,
         writeAccess: (args.writeAccess as 'none' | 'patch') ?? 'patch',
       })
     case 'cli':
@@ -474,14 +488,21 @@ async function commandAddWorker(args: CliArgs): Promise<void> {
     switch (kind) {
       case 'opencode':
         process.stdout.write('\n── opencode adapter ────────────────────────────\n')
-        spec = opencodeAdapter({ id: await ask(rli, 'Worker id', 'opencode') })
+        spec = opencodeAdapter({
+          id: await ask(rli, 'Worker id', 'opencode'),
+          model: await ask(rli, 'Model/provider (leave empty for default)', '') || undefined,
+        })
         break
       case 'claude-cli':
         process.stdout.write('\n── claude-cli adapter ───────────────────────────\n')
-        spec = claudeCliAdapter({ id: await ask(rli, 'Worker id', 'claude-cli') })
+        spec = claudeCliAdapter({
+          id: await ask(rli, 'Worker id', 'claude-cli'),
+          model: await ask(rli, 'Model (leave empty for default)', '') || undefined,
+        })
         break
       case 'openai': spec = await promptOpenAi(rli); break
       case 'anthropic': spec = await promptAnthropic(rli); break
+      case 'chatgpt': spec = await promptChatGpt(rli); break
       case 'ollama': spec = await promptOllama(rli); break
       case 'cli': spec = await promptCli(rli); break
       default:

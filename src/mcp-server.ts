@@ -15,6 +15,8 @@ import { planTask, prepareDispatch, runTask } from './kernel/kernel.js'
 import { initProject } from './state/store.js'
 import { readMetrics, aggregateStats } from './state/metrics.js'
 import { createHarness } from './harness/harness.js'
+import { normalizeInput as ingressNormalize } from './ingress/ingress.js'
+import { renderPlanSummary, renderPointerList } from './egress/egress.js'
 
 const server = new McpServer({
   name: 'cortex',
@@ -41,8 +43,18 @@ server.registerTool('cortex_plan', {
 }, (args) => {
   try {
     const projectRoot = resolveDir(args.dir)
+    const ingressPacket = ingressNormalize({ content: args.task, kind: 'mcp', explicitGoal: args.goal, metadata: { projectRoot } })
     const { intent, plan } = planTask(args.task, projectRoot)
-    return { content: [{ type: 'text', text: JSON.stringify({ intent, plan }, null, 2) }] }
+    const data = {
+      intent,
+      plan,
+      _ingress: {
+        source: ingressPacket.source,
+        sessionId: ingressPacket.sessionId,
+        preClassified: ingressPacket.preClassified,
+      },
+    }
+    return { content: [{ type: 'text', text: renderPlanSummary(data, { targetKind: 'mcp' }) }] }
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : String(e)
     return { content: [{ type: 'text', text: `error: ${msg}` }], isError: true }
@@ -56,9 +68,10 @@ server.registerTool('cortex_locate', {
 }, (args) => {
   try {
     const projectRoot = resolveDir(args.dir)
+    const ingressPacket = ingressNormalize({ content: args.task, kind: 'mcp', explicitGoal: args.goal, metadata: { projectRoot } })
     const intent = { ...compileIntent(args.task), taskType: 'locate' as const }
-    const context = compileContext(projectRoot, args.goal ?? args.task, intent, DEFAULT_BUDGET)
-    const text = context.pointers.length > 0 ? context.pointers.join('\n') : 'no pointers found'
+    const context = compileContext(projectRoot, ingressPacket.ucp.g, intent, DEFAULT_BUDGET)
+    const text = renderPointerList(context.pointers, { targetKind: 'mcp' })
     return { content: [{ type: 'text', text }] }
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : String(e)
@@ -136,9 +149,16 @@ server.registerTool('cortex_dispatch', {
     const projectRoot = resolveDir(args.dir)
     const budget = args.budget ?? DEFAULT_BUDGET.maxInputTokens
     const budgetConfig: BudgetConfig = { ...DEFAULT_BUDGET, maxInputTokens: budget }
+
+    const ingressPacket = ingressNormalize({
+      content: args.task,
+      kind: 'mcp',
+      explicitGoal: args.goal,
+      metadata: { projectRoot, budget: String(budget) },
+    })
     const config = {
       projectRoot,
-      goal: args.goal ?? args.task,
+      goal: ingressPacket.ucp.g,
       budget: budgetConfig,
       timeoutMs: args.timeout ?? 180_000,
     }
@@ -146,7 +166,7 @@ server.registerTool('cortex_dispatch', {
     if (args.dry_run) {
       const prepared = prepareDispatch(args.task, config)
       if (prepared.kind === 'pointers') {
-        return { content: [{ type: 'text', text: prepared.pointers.join('\n') }] }
+        return { content: [{ type: 'text', text: renderPointerList(prepared.pointers, { targetKind: 'mcp' }) }] }
       }
       if (prepared.kind === 'refused') {
         return { content: [{ type: 'text', text: `budget refused dispatch: ${prepared.reason}` }], isError: true }
@@ -162,7 +182,7 @@ server.registerTool('cortex_dispatch', {
 
     const outcome = await runTask(args.task, config)
     if (outcome.kind === 'pointers') {
-      return { content: [{ type: 'text', text: outcome.pointers.join('\n') }] }
+      return { content: [{ type: 'text', text: renderPointerList(outcome.pointers, { targetKind: 'mcp' }) }] }
     }
     if (outcome.kind === 'refused') {
       return { content: [{ type: 'text', text: `budget refused dispatch: ${outcome.reason}` }], isError: true }
