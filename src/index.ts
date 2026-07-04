@@ -320,55 +320,86 @@ function cortexDir(projectRoot: string): string {
   return process.env['CORTEX_DIR'] ?? path.join(projectRoot, '.cortex')
 }
 
-function commandAddWorker(args: CliArgs): void {
-  const projectRoot = args.dir ?? process.cwd()
-  const provider = args.provider ?? args.task
-  if (!provider || !TEMPLATES.some(t => t.kind === provider)) {
-    logError(`unknown provider "${provider}". Available: ${TEMPLATES.map(t => t.kind).join(', ')}`)
-    process.exit(1)
+// ── Interactive prompts ────────────────────────────────────────────────
+
+import * as readline from 'node:readline/promises'
+
+async function withRl<T>(fn: (rl: readline.Interface) => Promise<T>): Promise<T> {
+  const rli = readline.createInterface({ input: process.stdin, output: process.stdout })
+  try {
+    return await fn(rli)
+  } finally {
+    rli.close()
   }
+}
 
-  const workerId = args.workerId ?? provider
-  const spec: WorkerSpec = (() => {
-    switch (provider) {
-      case 'openai':
-        return openAiTemplate({
-          id: workerId,
-          model: args.model,
-          apiKey: args.apiKey,
-          baseUrl: args.baseUrl,
-          writeAccess: (args.writeAccess as 'none' | 'patch') ?? 'patch',
-        })
-      case 'anthropic':
-        return anthropicTemplate({
-          id: workerId,
-          model: args.model,
-          apiKey: args.apiKey,
-          writeAccess: (args.writeAccess as 'none' | 'patch') ?? 'patch',
-        })
-      case 'ollama':
-        return ollamaTemplate({
-          id: workerId,
-          model: args.model,
-          baseUrl: args.baseUrl,
-          writeAccess: (args.writeAccess as 'none' | 'patch') ?? 'none',
-        })
-      case 'cli':
-        if (!args.bin) {
-          logError('--bin is required for cli template')
-          process.exit(1)
-        }
-        return cliTemplate({
-          id: workerId,
-          bin: args.bin,
-          writeAccess: (args.writeAccess as 'none' | 'patch') ?? 'patch',
-        })
-      default:
-        logError(`template ${provider} not yet supported via CLI (use config file directly)`)
-        process.exit(1)
-    }
-  })()
+async function ask(rli: readline.Interface, question: string, defaultVal?: string): Promise<string> {
+  const hint = defaultVal ? ` [${defaultVal}]` : ''
+  const answer = await rli.question(`${question}${hint}: `)
+  return answer || defaultVal || ''
+}
 
+async function pick(rli: readline.Interface, label: string, choices: string[]): Promise<string> {
+  process.stdout.write(`\n${label}\n`)
+  for (let i = 0; i < choices.length; i++) {
+    process.stdout.write(`  ${i + 1}) ${choices[i]}\n`)
+  }
+  const raw = await rli.question(`Enter number (1-${choices.length}): `)
+  const idx = parseInt(raw, 10) - 1
+  if (isNaN(idx) || idx < 0 || idx >= choices.length) {
+    process.stdout.write(`invalid choice, defaulting to "${choices[0]}"\n`)
+    return choices[0]
+  }
+  return choices[idx]!
+}
+
+async function promptOpenAi(rli: readline.Interface): Promise<WorkerSpec> {
+  const id = await ask(rli, 'Worker id', 'openai')
+  const model = await ask(rli, 'Model', 'gpt-4o')
+  const keyHint = process.env['OPENAI_API_KEY'] ? '<from env>' : ''
+  const apiKey = await ask(rli, 'API key (leave empty to skip)', keyHint) || undefined
+  const baseUrl = await ask(rli, 'Base URL', 'https://api.openai.com/v1')
+  return openAiTemplate({
+    id, model, apiKey, baseUrl,
+    writeAccess: await pick(rli, 'Write access', ['patch', 'none']) as 'patch' | 'none',
+  })
+}
+
+async function promptAnthropic(rli: readline.Interface): Promise<WorkerSpec> {
+  const id = await ask(rli, 'Worker id', 'anthropic')
+  const model = await ask(rli, 'Model', 'claude-sonnet-4-20250514')
+  const keyHint = process.env['ANTHROPIC_API_KEY'] ? '<from env>' : ''
+  const apiKey = await ask(rli, 'API key (leave empty to skip)', keyHint) || undefined
+  return anthropicTemplate({
+    id, model, apiKey,
+    writeAccess: await pick(rli, 'Write access', ['patch', 'none']) as 'patch' | 'none',
+  })
+}
+
+async function promptOllama(rli: readline.Interface): Promise<WorkerSpec> {
+  const id = await ask(rli, 'Worker id', 'ollama')
+  const model = await ask(rli, 'Model', 'llama3.2')
+  const baseUrl = await ask(rli, 'Base URL', 'http://localhost:11434')
+  return ollamaTemplate({
+    id, model, baseUrl,
+    writeAccess: await pick(rli, 'Write access', ['none', 'patch']) as 'patch' | 'none',
+  })
+}
+
+async function promptCli(rli: readline.Interface): Promise<WorkerSpec> {
+  const id = await ask(rli, 'Worker id', 'cli-worker')
+  const bin = await ask(rli, 'Binary path (e.g. ./llamafile)')
+  if (!bin) { process.stdout.write('binary path is required\n'); process.exit(1) }
+  const promptVia = await pick(rli, 'Prompt delivery', ['stdin', 'arg']) as 'stdin' | 'arg'
+  const argsRaw = await ask(rli, 'Extra CLI args (comma-separated)', '')
+  const args = argsRaw ? argsRaw.split(',').map(s => s.trim()).filter(Boolean) : []
+  return cliTemplate({
+    id, bin, promptVia, args,
+    writeAccess: await pick(rli, 'Write access', ['patch', 'none']) as 'patch' | 'none',
+  })
+}
+
+async function writeWorkerSpec(spec: WorkerSpec, projectRoot: string): Promise<void> {
   const dir = cortexDir(projectRoot)
   const filePath = path.join(dir, 'workers.json')
   let existing: { workers: unknown[] } = { workers: [] }
@@ -380,22 +411,98 @@ function commandAddWorker(args: CliArgs): void {
   }
   if (!Array.isArray(existing.workers)) existing.workers = []
 
-  // Replace existing entry with same id, otherwise append
   const idx = existing.workers.findIndex((w: unknown) => {
     const id = (w as Record<string, unknown>).id
-    return id === workerId
+    return id === spec.id
   })
   if (idx !== -1) {
     existing.workers[idx] = spec
-    process.stdout.write(`replaced worker "${workerId}" in ${filePath}\n`)
+    process.stdout.write(`replaced worker "${spec.id}" in ${filePath}\n`)
   } else {
     existing.workers.push(spec)
-    process.stdout.write(`added worker "${workerId}" to ${filePath}\n`)
+    process.stdout.write(`added worker "${spec.id}" to ${filePath}\n`)
   }
 
   fs.mkdirSync(dir, { recursive: true })
   fs.writeFileSync(filePath, JSON.stringify(existing, null, 2) + '\n')
   process.stdout.write(`\nworker spec:\n${JSON.stringify(spec, null, 2)}\n`)
+}
+
+function buildSpecFromFlags(args: CliArgs): WorkerSpec {
+  const provider = args.provider ?? args.task
+  const workerId = args.workerId ?? provider
+  switch (provider) {
+    case 'openai':
+      return openAiTemplate({
+        id: workerId, model: args.model, apiKey: args.apiKey, baseUrl: args.baseUrl,
+        writeAccess: (args.writeAccess as 'none' | 'patch') ?? 'patch',
+      })
+    case 'anthropic':
+      return anthropicTemplate({
+        id: workerId, model: args.model, apiKey: args.apiKey,
+        writeAccess: (args.writeAccess as 'none' | 'patch') ?? 'patch',
+      })
+    case 'ollama':
+      return ollamaTemplate({
+        id: workerId, model: args.model, baseUrl: args.baseUrl,
+        writeAccess: (args.writeAccess as 'none' | 'patch') ?? 'none',
+      })
+    case 'cli':
+      if (!args.bin) {
+        logError('--bin is required for cli template')
+        process.exit(1)
+      }
+      return cliTemplate({
+        id: workerId, bin: args.bin,
+        writeAccess: (args.writeAccess as 'none' | 'patch') ?? 'patch',
+      })
+    default:
+      logError(`template ${provider} not yet supported via CLI flags (use interactive mode)`)
+      process.exit(1)
+  }
+}
+
+async function commandAddWorker(args: CliArgs): Promise<void> {
+  const projectRoot = args.dir ?? process.cwd()
+
+  if (args.provider || args.task) {
+    const provider = args.provider ?? args.task
+    if (!provider || !TEMPLATES.some(t => t.kind === provider)) {
+      logError(`unknown provider "${provider}". Available: ${TEMPLATES.map(t => t.kind).join(', ')}`)
+      process.exit(1)
+    }
+    const spec = buildSpecFromFlags(args)
+    await writeWorkerSpec(spec, projectRoot)
+    return
+  }
+
+  // Interactive mode
+  process.stdout.write('\n── add worker ──────────────────────────────────\n')
+
+  await withRl(async (rli) => {
+    const provider = await pick(rli, 'Choose a harness template:', TEMPLATES.map(t => t.kind))
+
+    let spec: WorkerSpec
+    switch (provider) {
+      case 'openai': spec = await promptOpenAi(rli); break
+      case 'anthropic': spec = await promptAnthropic(rli); break
+      case 'ollama': spec = await promptOllama(rli); break
+      case 'cli': spec = await promptCli(rli); break
+      default:
+        logError(`template ${provider} not yet supported in interactive mode`)
+        process.exit(1)
+    }
+
+    process.stdout.write(`\n── preview ─────────────────────────────────────\n`)
+    process.stdout.write(`${JSON.stringify(spec, null, 2)}\n`)
+    const ok = await pick(rli, 'Write this worker?', ['yes', 'no'])
+    if (ok !== 'yes') {
+      process.stdout.write('cancelled\n')
+      return
+    }
+
+    await writeWorkerSpec(spec, projectRoot)
+  })
 }
 
 async function main(): Promise<void> {
