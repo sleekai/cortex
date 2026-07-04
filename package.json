@@ -1,5 +1,5 @@
 {
-  "name": "@sleekstack/cortex",
+  "name": "@sleekai/cortex",
   "version": "2.0.0",
   "type": "module",
   "description": "Cortex — AI Compute Operating System: capability-planned, budget-capped, harness-agnostic dispatch kernel (UCP v2)",
@@ -13,11 +13,11 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/sleekstack/cortex.git"
+    "url": "git+https://github.com/sleekai/cortex.git"
   },
-  "homepage": "https://github.com/sleekstack/cortex#readme",
+  "homepage": "https://github.com/sleekai/cortex#readme",
   "bugs": {
-    "url": "https://github.com/sleekstack/cortex/issues"
+    "url": "https://github.com/sleekai/cortex/issues"
   },
   "keywords": [
     "ai",
