@@ -3,7 +3,7 @@
 Model-agnostic, harness-agnostic, protocol-agnostic dispatch kernel for AI workloads.
 
 ```bash
-npm install @sleekskack/cortex
+npm install @sleekstack/cortex
 npx cortex init            # scaffold .cortex/ state directory
 npx cortex dispatch "task" # dispatch to best available worker
 npx cortex plan "task"     # preview dispatch plan, zero model calls

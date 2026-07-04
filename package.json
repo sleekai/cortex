@@ -1,5 +1,5 @@
 {
-  "name": "@sleekskack/cortex",
+  "name": "@sleekstack/cortex",
   "version": "2.0.0",
   "type": "module",
   "description": "Cortex — AI Compute Operating System: capability-planned, budget-capped, harness-agnostic dispatch kernel (UCP v2)",
