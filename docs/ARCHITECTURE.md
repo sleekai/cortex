@@ -10,6 +10,12 @@ This plan follows the audit in `docs/AUDIT.md`. Guiding rule from the audit:
 validation loop, and stateless one-shot discipline survive intact; everything
 implicit becomes explicit and typed.
 
+Status (2026-07): phases 1–5 below are implemented and tested. The kernel is
+extracted (`src/kernel/kernel.ts`); the DAG executor supports checkpointing,
+resume, and cooperative cancellation. `docs/AUDIT.md` §4 records what is
+deliberately deferred and why (call/dependency-graph retrieval, embeddings,
+additional protocol harnesses, a persistent repository index).
+
 ## Deviations from the vNext specification (deliberate)
 
 The spec invites improvement where a superior design exists. Three deviations:
@@ -36,6 +42,9 @@ The spec invites improvement where a superior design exists. Three deviations:
 ```
 skills/ucp-toolchain/implementation/   (package: cortex)
   src/
+    kernel/
+      kernel.ts         the one pipeline: planTask | prepareDispatch | runTask;
+                        CLI and MCP server are thin surfaces over it
     core/
       types.ts          shared primitives (chunks, budgets) — extended, kept
       logger.ts         kept
@@ -213,8 +222,14 @@ Executes a `DispatchPlan` of nodes `{ packet, workerId, dependsOn[] }`:
 independent nodes run in parallel (`Promise.all` over async harness calls,
 bounded concurrency), dependents sequence, failures trigger per-node retry
 policy (error-only retry packet, unchanged semantics) then ladder escalation.
-Cancellation = abandoning unresolved promises after timeout; `spawnSync`
-is replaced by async spawn throughout.
+
+Checkpointing and replay: `executePlan` accepts `resumeFrom` (settled nodes
+are restored without re-dispatch — partial recomputation), `onNodeComplete`
+(fires per dispatched node; wire it to `saveRunCheckpoint`), and an
+`AbortSignal` for cooperative cancellation — nothing launches after abort,
+in-flight harness calls drain, and cancelled nodes settle as *recoverable*
+failures so a resume re-runs them. True mid-call abort would need harness
+support and is deferred until a harness can honor it.
 
 ### State engine & learning (`state/`)
 
@@ -225,6 +240,9 @@ is replaced by async spawn throughout.
 - `artifacts/<taskId>/*.json` — persisted decisions, reviews, plans.
 - `metrics.jsonl` — one record per dispatch: worker, tier, tokens in/out (est),
   latency, iterations, ok/fail, context level. Append-only.
+- `runs/<runId>.json` — execution-graph checkpoints: the non-failure node
+  results of a run (failures and cancellations are never persisted — they
+  must re-run on resume).
 - `workers.json` — optional project-local worker registry overlay.
 
 `metrics.ts` aggregates per-worker success rate / mean latency / mean tokens
