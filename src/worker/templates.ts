@@ -198,6 +198,58 @@ export function httpTemplate(args: HttpTemplateArgs): WorkerSpec {
   }
 }
 
+// ── Pre-built adapters (zero-config) ────────────────────────────────────
+
+export interface AdapterArgs extends TemplateArgs {
+  binEnvOverride?: string
+}
+
+export function opencodeAdapter(args: AdapterArgs): WorkerSpec {
+  return {
+    id: args.id ?? 'opencode',
+    capabilities: ['coding', 'reasoning', 'planning', 'review', 'docs'],
+    harness: {
+      kind: 'cli',
+      bin: 'opencode',
+      args: ['-p', '-t', '{{prompt}}', '-y'],
+      stripEnv: [],
+      promptVia: 'arg',
+      probeArgs: ['--version'],
+      binEnvOverride: args.binEnvOverride ?? 'OPENCODE_BIN',
+    },
+    cost: { inPer1k: 0, outPer1k: 0 },
+    speed: 0.4,
+    contextWindow: 128000,
+    quality: { coding: 0.88, reasoning: 0.9, planning: 0.85, review: 0.85, docs: 0.8 },
+    reliability: 0.85,
+    tier: args.tier ?? 3,
+    writeAccess: args.writeAccess ?? 'patch',
+  }
+}
+
+export function claudeCliAdapter(args: AdapterArgs): WorkerSpec {
+  return {
+    id: args.id ?? 'claude-cli',
+    capabilities: ['coding', 'reasoning', 'planning', 'review', 'docs'],
+    harness: {
+      kind: 'cli',
+      bin: 'claude',
+      args: ['-p', '--output-format', 'text', '--tools', '', '--no-session-persistence'],
+      stripEnv: ['CLAUDECODE', 'CLAUDE_CODE_ENTRYPOINT'],
+      promptVia: 'stdin',
+      probeArgs: ['--version'],
+      binEnvOverride: args.binEnvOverride ?? 'TOOLCHAIN_CLAUDE_BIN',
+    },
+    cost: { inPer1k: 3, outPer1k: 15 },
+    speed: 0.3,
+    contextWindow: 200000,
+    quality: { coding: 0.95, reasoning: 0.95, planning: 0.9, review: 0.9, docs: 0.85 },
+    reliability: 0.9,
+    tier: args.tier ?? 3,
+    writeAccess: args.writeAccess ?? 'patch',
+  }
+}
+
 // ── Template registry ───────────────────────────────────────────────────
 
 export type TemplateKind =
@@ -206,17 +258,22 @@ export type TemplateKind =
   | 'ollama'
   | 'cli'
   | 'http'
+  | 'opencode'
+  | 'claude-cli'
 
 export interface TemplateInfo {
   kind: TemplateKind
   label: string
   description: string
+  adapter?: true // pre-built, zero-config
 }
 
 export const TEMPLATES: TemplateInfo[] = [
   { kind: 'openai', label: 'OpenAI-compatible', description: 'OpenAI API or any OpenAI-compatible endpoint (OpenAI, Groq, Together, etc.)' },
   { kind: 'anthropic', label: 'Anthropic', description: 'Anthropic Messages API (Claude models)' },
   { kind: 'ollama', label: 'Ollama (local)', description: 'Local Ollama instance' },
+  { kind: 'opencode', label: 'OpenCode', description: 'OpenCode CLI agent (zero-config)', adapter: true },
+  { kind: 'claude-cli', label: 'Claude CLI', description: 'Claude CLI (zero-config)', adapter: true },
   { kind: 'cli', label: 'Generic CLI', description: 'Any CLI binary (llamafile, local models, etc.)' },
   { kind: 'http', label: 'Generic HTTP', description: 'Any HTTP API with JSON body/response' },
 ]

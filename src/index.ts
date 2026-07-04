@@ -24,7 +24,7 @@ import { initProject, updateState, loadState, saveArtifact, stateDir } from './s
 import { appendMetric, readMetrics, aggregateStats, reliabilityOverrides } from './state/metrics.js'
 import { createHarness } from './harness/harness.js'
 import { type UCP } from './packet/ucp.js'
-import { TEMPLATES, openAiTemplate, anthropicTemplate, ollamaTemplate, cliTemplate, httpTemplate } from './worker/templates.js'
+import { TEMPLATES, type TemplateKind, openAiTemplate, anthropicTemplate, ollamaTemplate, cliTemplate, httpTemplate, opencodeAdapter, claudeCliAdapter } from './worker/templates.js'
 import { type WorkerSpec } from './worker/registry.js'
 import * as fs from 'node:fs'
 import * as path from 'node:path'
@@ -115,8 +115,10 @@ Usage:
   cortex metrics [options]           per-worker stats from .cortex/metrics.jsonl
   cortex add-worker <provider> [opts] add a worker from a harness template
 
-Providers:
-${TEMPLATES.map(t => `  ${t.kind.padEnd(12)} ${t.description}`).join('\n')}
+Adapters (zero-config):
+${TEMPLATES.filter(t => t.adapter).map(t => `  ${t.kind.padEnd(12)} ${t.description}`).join('\n')}
+Templates:
+${TEMPLATES.filter(t => !t.adapter).map(t => `  ${t.kind.padEnd(12)} ${t.description}`).join('\n')}
 
 Options:
   --task, -t     Task description (required for dispatch/plan/locate)
@@ -447,6 +449,16 @@ function buildSpecFromFlags(args: CliArgs): WorkerSpec {
         id: workerId, model: args.model, baseUrl: args.baseUrl,
         writeAccess: (args.writeAccess as 'none' | 'patch') ?? 'none',
       })
+    case 'opencode':
+      return opencodeAdapter({
+        id: workerId,
+        writeAccess: (args.writeAccess as 'none' | 'patch') ?? 'patch',
+      })
+    case 'claude-cli':
+      return claudeCliAdapter({
+        id: workerId,
+        writeAccess: (args.writeAccess as 'none' | 'patch') ?? 'patch',
+      })
     case 'cli':
       if (!args.bin) {
         logError('--bin is required for cli template')
@@ -480,16 +492,30 @@ async function commandAddWorker(args: CliArgs): Promise<void> {
   process.stdout.write('\n── add worker ──────────────────────────────────\n')
 
   await withRl(async (rli) => {
-    const provider = await pick(rli, 'Choose a harness template:', TEMPLATES.map(t => t.kind))
+    const provider = await pick(rli, 'Choose a harness template:', TEMPLATES.map(t => {
+      const label = t.adapter ? `${t.kind} (adapter)` : t.kind
+      return `${label.padEnd(22)} ${t.description}`
+    }))
+
+    // Map back from the padded display string to the raw kind
+    const kind = TEMPLATES.find(t => provider.startsWith(t.kind))?.kind ?? provider as TemplateKind
 
     let spec: WorkerSpec
-    switch (provider) {
+    switch (kind) {
+      case 'opencode':
+        process.stdout.write('\n── opencode adapter ────────────────────────────\n')
+        spec = opencodeAdapter({ id: await ask(rli, 'Worker id', 'opencode') })
+        break
+      case 'claude-cli':
+        process.stdout.write('\n── claude-cli adapter ───────────────────────────\n')
+        spec = claudeCliAdapter({ id: await ask(rli, 'Worker id', 'claude-cli') })
+        break
       case 'openai': spec = await promptOpenAi(rli); break
       case 'anthropic': spec = await promptAnthropic(rli); break
       case 'ollama': spec = await promptOllama(rli); break
       case 'cli': spec = await promptCli(rli); break
       default:
-        logError(`template ${provider} not yet supported in interactive mode`)
+        logError(`template ${kind} not yet supported in interactive mode`)
         process.exit(1)
     }
 
