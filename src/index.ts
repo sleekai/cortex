@@ -24,9 +24,13 @@ import { initProject, updateState, loadState, saveArtifact, stateDir } from './s
 import { appendMetric, readMetrics, aggregateStats, reliabilityOverrides } from './state/metrics.js'
 import { createHarness } from './harness/harness.js'
 import { type UCP } from './packet/ucp.js'
+import { TEMPLATES, openAiTemplate, anthropicTemplate, ollamaTemplate, cliTemplate, httpTemplate } from './worker/templates.js'
+import { type WorkerSpec } from './worker/registry.js'
+import * as fs from 'node:fs'
+import * as path from 'node:path'
 
 interface CliArgs {
-  command: 'run' | 'dispatch' | 'plan' | 'locate' | 'workers' | 'metrics' | 'init'
+  command: 'run' | 'dispatch' | 'plan' | 'locate' | 'workers' | 'metrics' | 'init' | 'add-worker'
   task: string
   goal?: string
   dir?: string
@@ -34,9 +38,17 @@ interface CliArgs {
   budget?: string
   timeout?: string
   dryRun?: boolean
+  // add-worker specific
+  provider?: string
+  workerId?: string
+  model?: string
+  apiKey?: string
+  baseUrl?: string
+  bin?: string
+  writeAccess?: string
 }
 
-const COMMANDS = new Set(['run', 'dispatch', 'plan', 'locate', 'workers', 'metrics', 'init'])
+const COMMANDS = new Set(['run', 'dispatch', 'plan', 'locate', 'workers', 'metrics', 'init', 'add-worker'])
 
 const COMMAND_ALIASES: Record<string, CliArgs['command']> = {
   run: 'dispatch',
@@ -67,6 +79,20 @@ function parseArgs(raw: string[]): CliArgs {
       args.timeout = raw[++i]!
     } else if (arg === '--dry-run') {
       args.dryRun = true
+    } else if ((arg === '--provider' || arg === '-p') && i + 1 < raw.length) {
+      args.provider = raw[++i]!
+    } else if ((arg === '--id' || arg === '-n') && i + 1 < raw.length) {
+      args.workerId = raw[++i]!
+    } else if (arg === '--model' && i + 1 < raw.length) {
+      args.model = raw[++i]!
+    } else if ((arg === '--api-key' || arg === '-k') && i + 1 < raw.length) {
+      args.apiKey = raw[++i]!
+    } else if (arg === '--base-url' && i + 1 < raw.length) {
+      args.baseUrl = raw[++i]!
+    } else if (arg === '--bin' && i + 1 < raw.length) {
+      args.bin = raw[++i]!
+    } else if (arg === '--write-access' && i + 1 < raw.length) {
+      args.writeAccess = raw[++i]!
     } else if (arg === '--help' || arg === '-h') {
       printHelp()
       process.exit(0)
@@ -87,6 +113,10 @@ Usage:
   cortex locate <keywords> [options] tier-0 deterministic pointers, no model call
   cortex workers [options]           list registered workers + availability
   cortex metrics [options]           per-worker stats from .cortex/metrics.jsonl
+  cortex add-worker <provider> [opts] add a worker from a harness template
+
+Providers:
+${TEMPLATES.map(t => `  ${t.kind.padEnd(12)} ${t.description}`).join('\n')}
 
 Options:
   --task, -t     Task description (required for dispatch/plan/locate)
@@ -96,6 +126,13 @@ Options:
   --budget       Max input tokens (default: ${DEFAULT_BUDGET.maxInputTokens})
   --timeout      Worker timeout in ms (default: 180000)
   --dry-run      Print packet + prompt and exit (no model call, no patch)
+  --provider,-p  Worker template (openai, anthropic, ollama, cli, http)
+  --id,-n        Worker id (default: derived from provider)
+  --model        Model name (for openai/anthropic/ollama templates)
+  --api-key,-k   API key (for openai/anthropic templates; falls back to env)
+  --base-url     API base URL (for openai/ollama templates)
+  --bin          Binary path (for cli template)
+  --write-access Write access (none|patch, default: patch)
   --help, -h     Show help
 
 Examples:
@@ -103,6 +140,10 @@ Examples:
   cortex dispatch "add JWT auth middleware to Express app"
   cortex plan --task "fix login form validation" --dir ./my-app
   cortex locate "budget enforcement" --dir .
+  cortex add-worker openai --model gpt-4o-mini --id openai-cheap
+  cortex add-worker anthropic --model claude-sonnet-4-20250514
+  cortex add-worker ollama --model llama3.2 --base-url http://192.168.1.5:11434
+  cortex add-worker cli --id my-llamafile --bin ./llamafile --promptVia arg
 `)
 }
 
@@ -275,10 +316,92 @@ function commandInit(args: CliArgs): void {
   process.stdout.write(`initialised cortex state directory at ${dir}\n`)
 }
 
+function cortexDir(projectRoot: string): string {
+  return process.env['CORTEX_DIR'] ?? path.join(projectRoot, '.cortex')
+}
+
+function commandAddWorker(args: CliArgs): void {
+  const projectRoot = args.dir ?? process.cwd()
+  const provider = args.provider ?? args.task
+  if (!provider || !TEMPLATES.some(t => t.kind === provider)) {
+    logError(`unknown provider "${provider}". Available: ${TEMPLATES.map(t => t.kind).join(', ')}`)
+    process.exit(1)
+  }
+
+  const workerId = args.workerId ?? provider
+  const spec: WorkerSpec = (() => {
+    switch (provider) {
+      case 'openai':
+        return openAiTemplate({
+          id: workerId,
+          model: args.model,
+          apiKey: args.apiKey,
+          baseUrl: args.baseUrl,
+          writeAccess: (args.writeAccess as 'none' | 'patch') ?? 'patch',
+        })
+      case 'anthropic':
+        return anthropicTemplate({
+          id: workerId,
+          model: args.model,
+          apiKey: args.apiKey,
+          writeAccess: (args.writeAccess as 'none' | 'patch') ?? 'patch',
+        })
+      case 'ollama':
+        return ollamaTemplate({
+          id: workerId,
+          model: args.model,
+          baseUrl: args.baseUrl,
+          writeAccess: (args.writeAccess as 'none' | 'patch') ?? 'none',
+        })
+      case 'cli':
+        if (!args.bin) {
+          logError('--bin is required for cli template')
+          process.exit(1)
+        }
+        return cliTemplate({
+          id: workerId,
+          bin: args.bin,
+          writeAccess: (args.writeAccess as 'none' | 'patch') ?? 'patch',
+        })
+      default:
+        logError(`template ${provider} not yet supported via CLI (use config file directly)`)
+        process.exit(1)
+    }
+  })()
+
+  const dir = cortexDir(projectRoot)
+  const filePath = path.join(dir, 'workers.json')
+  let existing: { workers: unknown[] } = { workers: [] }
+  try {
+    const raw = fs.readFileSync(filePath, 'utf-8')
+    existing = JSON.parse(raw)
+  } catch {
+    // file doesn't exist yet — start fresh
+  }
+  if (!Array.isArray(existing.workers)) existing.workers = []
+
+  // Replace existing entry with same id, otherwise append
+  const idx = existing.workers.findIndex((w: unknown) => {
+    const id = (w as Record<string, unknown>).id
+    return id === workerId
+  })
+  if (idx !== -1) {
+    existing.workers[idx] = spec
+    process.stdout.write(`replaced worker "${workerId}" in ${filePath}\n`)
+  } else {
+    existing.workers.push(spec)
+    process.stdout.write(`added worker "${workerId}" to ${filePath}\n`)
+  }
+
+  fs.mkdirSync(dir, { recursive: true })
+  fs.writeFileSync(filePath, JSON.stringify(existing, null, 2) + '\n')
+  process.stdout.write(`\nworker spec:\n${JSON.stringify(spec, null, 2)}\n`)
+}
+
 async function main(): Promise<void> {
   const args = parseArgs(process.argv)
 
-  if (args.command !== 'workers' && args.command !== 'metrics' && args.command !== 'init' && !args.task) {
+  if (args.command !== 'workers' && args.command !== 'metrics' && args.command !== 'init' && args.command !== 'add-worker' && !args.task) {
     printHelp()
     process.exit(1)
   }
@@ -290,6 +413,7 @@ async function main(): Promise<void> {
     case 'workers': return commandWorkers(args)
     case 'metrics': return commandMetrics(args)
     case 'init': return commandInit(args)
+    case 'add-worker': return commandAddWorker(args)
   }
 }
 
