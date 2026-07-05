@@ -233,7 +233,7 @@ async function commandRun(args: CliArgs): Promise<void> {
 
   const outcome = await executeTask(args.task, config)
   if (outcome.kind === 'pointers') {
-    process.stdout.write(renderPointerList(outcome.pointers, { targetKind: 'cli' }) + '\n')
+    process.stdout.write(renderPointerList(outcome.pointers) + '\n')
     return
   }
   if (outcome.kind === 'refused') {
@@ -299,7 +299,7 @@ async function commandLoop(args: CliArgs): Promise<void> {
 
   const outcome = await executeTask(args.task, config)
   if (outcome.kind === 'pointers') {
-    process.stdout.write(renderPointerList(outcome.pointers, { targetKind: 'cli' }) + '\n')
+    process.stdout.write(renderPointerList(outcome.pointers) + '\n')
     return
   }
   if (outcome.kind === 'refused') {
@@ -426,7 +426,7 @@ function commandLocate(args: CliArgs): void {
   const projectRoot = args.dir ?? process.cwd()
   const ingressPacket = ingressNormalize({ content: args.task, kind: 'cli', explicitGoal: args.goal })
   const pointers = runLocate(args.task, projectRoot, ingressPacket.ucp.g)
-  process.stdout.write(renderPointerList(pointers, { targetKind: 'cli' }) + '\n')
+  process.stdout.write(renderPointerList(pointers) + '\n')
 }
 
 function commandWorkers(args: CliArgs): void {

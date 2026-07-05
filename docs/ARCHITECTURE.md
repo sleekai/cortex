@@ -95,10 +95,9 @@ cortex   (package: @sleekai/cortex)
       registry.ts       WorkerSpec registry: load, validate, query by capability
       registry.default.json   built-in workers (claude CLI as the first entry)
       dispatch.ts       dispatch planner: sequential / parallel / fan-out, retry
-      output-parser.ts  thin composition over extractors below
+      artifact-builder.ts parse-once boundary: raw output → typed Artifacts
       diff-extractor.ts  diff extraction from raw harness output
       json-extractor.ts  JSON extraction from oracle replies
-      artifact-builder.ts maps parsed output to typed Artifacts
       prompt.ts         system/user prompt templates per capability
       templates.ts      worker-specific template helpers
     harness/

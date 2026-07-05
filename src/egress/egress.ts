@@ -197,9 +197,6 @@ export function renderPlanSummary(data: object, options: EgressOptions): string 
     : JSON.stringify(data, null, options.indent ?? 2)
 }
 
-export function renderPointerList(pointers: string[], options: EgressOptions): string {
-  if (options.targetKind === 'mcp') {
-    return pointers.length > 0 ? pointers.join('\n') : 'no pointers found'
-  }
+export function renderPointerList(pointers: string[]): string {
   return pointers.length > 0 ? pointers.join('\n') : 'no pointers found'
 }

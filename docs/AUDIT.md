@@ -87,7 +87,7 @@ error-only retry ≤3) → artifacts + state + metrics persisted.
 | `retrieval/` AST, TF-IDF, git-recency, L0–L4 compiler | deterministic, budget-gated escalation | **keep; escalation trigger is narrow (see §4)** |
 | `validator/` patch-apply + loop | error-only retry packets (tested invariant) | **keep unchanged** |
 | `state/` store + metrics | `.cortex/` engine, legacy migration, JSONL learning loop → planner priors | **keep** |
-| `worker/output-parser.ts` + diff-extractor, json-extractor, artifact-builder | thin composition over three focused extractors | **split** — was a 119-line monolith |
+| `worker/artifact-builder.ts` + diff-extractor, json-extractor | parse-once boundary over two focused extractors (the output-parser pass-through was inlined) | **keep** |
 | `index.ts` | CLI surface over `kernel/` | **done** — pipeline extracted |
 | `mcp-server.ts` | MCP surface over the same kernel | **done** — pipeline extracted |
 | `dist/`, `dist-test/` | build artifacts on disk | gitignored, untracked — no action |
@@ -121,7 +121,7 @@ Map and fragile control flow.
 | Phase | Directive | Status | Evidence |
 |---|---|---|---|
 | 1 Observability | metrics, token/latency/retry tracking | **done** | `state/metrics.ts` JSONL + aggregation + blended reliability |
-| 2 Artifact layer | typed artifacts everywhere | **done** | `artifact/artifacts.ts`; parse-once at `worker/output-parser.ts` |
+| 2 Artifact layer | typed artifacts everywhere | **done** | `artifact/artifacts.ts`; parse-once at `worker/artifact-builder.ts` |
 | 3 UCP | versioned compact packets | **done** | `packet/ucp.ts` v2, v1 read-compat, `docs/UCP-SPEC.md` |
 | 4 Context compiler | layered expansion | **done (L0–L4)** | `retrieval/context-compiler.ts` |
 | 5 Capability system | capability-centric execution | **done** | `capability/*`; planner never sees raw text |

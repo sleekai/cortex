@@ -82,11 +82,11 @@ test('renderPlanSummary: JSON output for MCP', () => {
 })
 
 test('renderPointerList: non-empty pointers', () => {
-  const out = renderPointerList(['src/auth.ts:10', 'src/auth.ts:42'], cliOpts())
+  const out = renderPointerList(['src/auth.ts:10', 'src/auth.ts:42'])
   assert.equal(out, 'src/auth.ts:10\nsrc/auth.ts:42')
 })
 
 test('renderPointerList: empty pointers', () => {
-  const out = renderPointerList([], cliOpts())
+  const out = renderPointerList([])
   assert.equal(out, 'no pointers found')
 })

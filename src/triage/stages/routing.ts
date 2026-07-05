@@ -2,7 +2,8 @@
 // for the scheduler, not a selection — CTS never picks a worker or dispatches.
 import { type TriageStage } from '../stage.js'
 import { type CtsTier } from '../packet.js'
-import { complexityOf, extractFileTokens, splitClauses, HUMAN_SIGNALS, LOCATE_VERBS, PATCH_VERBS } from '../signals.js'
+import { complexityOf, splitClauses, HUMAN_SIGNALS, LOCATE_VERBS, PATCH_VERBS } from '../signals.js'
+import { extractFileTokens } from '../../core/signals.js'
 
 const ORDER: CtsTier[] = ['T0', 'T1', 'T2', 'T3', 'T4']
 

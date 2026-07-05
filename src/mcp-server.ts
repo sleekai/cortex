@@ -80,7 +80,7 @@ server.registerTool('cortex_locate', {
     const projectRoot = resolveDir(args.dir)
     const ingressPacket = ingressNormalize({ content: args.task, kind: 'mcp', explicitGoal: args.goal, metadata: { projectRoot } })
     const pointers = runLocate(args.task, projectRoot, ingressPacket.ucp.g)
-    const text = renderPointerList(pointers, { targetKind: 'mcp' })
+    const text = renderPointerList(pointers)
     return { content: [{ type: 'text', text }] }
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : String(e)
@@ -170,7 +170,7 @@ server.registerTool('cortex_dispatch', {
       const triaged = triagedTask(args.task, config)
       const prepared = prepareDispatch(triaged.task, config, triaged.tierHint)
       if (prepared.kind === 'pointers') {
-        return { content: [{ type: 'text', text: renderPointerList(prepared.pointers, { targetKind: 'mcp' }) }] }
+        return { content: [{ type: 'text', text: renderPointerList(prepared.pointers) }] }
       }
       if (prepared.kind === 'refused') {
         return { content: [{ type: 'text', text: `budget refused dispatch: ${prepared.reason}` }], isError: true }
@@ -186,7 +186,7 @@ server.registerTool('cortex_dispatch', {
 
     const outcome = await executeTask(args.task, config)
     if (outcome.kind === 'pointers') {
-      return { content: [{ type: 'text', text: renderPointerList(outcome.pointers, { targetKind: 'mcp' }) }] }
+      return { content: [{ type: 'text', text: renderPointerList(outcome.pointers) }] }
     }
     if (outcome.kind === 'refused') {
       return { content: [{ type: 'text', text: `budget refused dispatch: ${outcome.reason}` }], isError: true }

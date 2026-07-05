@@ -1,6 +1,6 @@
 // Shared deterministic heuristics for the triage skills. Pure functions only;
 // no state, no I/O. Shared signal tables live in core/signals.ts.
-import { FILE_PATTERN, OPEN_SIGNALS, TRIVIAL_SIGNALS, extractFileTokens, classifyComplexity, type SignalComplexity } from '../core/signals.js'
+import { classifyComplexity, type SignalComplexity } from '../core/signals.js'
 
 export type TriageComplexity = SignalComplexity
 
@@ -26,8 +26,6 @@ export function wordCount(text: string): number {
   const t = text.trim()
   return t === '' ? 0 : t.split(/\s+/).length
 }
-
-export { extractFileTokens }
 
 export function extractIdentifiers(text: string): string[] {
   const out = new Set<string>()

@@ -3,8 +3,9 @@
 // question per flag. Deterministic; score is 1 (fully clear) minus penalties.
 import { type TriageStage } from '../stage.js'
 import {
-  PATCH_VERBS, VAGUE_SIGNALS, CONFLICT_SIGNALS, extractFileTokens, extractIdentifiers, wordCount,
+  PATCH_VERBS, VAGUE_SIGNALS, CONFLICT_SIGNALS, extractIdentifiers, wordCount,
 } from '../signals.js'
+import { extractFileTokens } from '../../core/signals.js'
 
 interface Signal {
   flag: string

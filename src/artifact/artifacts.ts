@@ -1,5 +1,5 @@
 // Typed artifacts are the only currency inside Cortex. Raw model output is
-// parsed exactly once at the harness boundary (worker/output-parser.ts) into
+// parsed exactly once at the harness boundary (worker/artifact-builder.ts) into
 // an Artifact; everything downstream — planner, state engine, skills — deals
 // in these shapes, never in prose or chat history.
 import * as crypto from 'node:crypto'

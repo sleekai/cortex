@@ -1,7 +1,16 @@
+// Parse-once at the harness boundary: raw worker output becomes a typed
+// artifact here and nowhere else. Work packets yield patch/failure;
+// judgment packets (ask/review) yield decision/review/failure.
 import { type UCP } from '../packet/ucp.js'
 import { type Artifact, type ReviewFinding, type ReviewSeverity, makeArtifact } from '../artifact/artifacts.js'
 import { extractDiff, extractReasoning } from './diff-extractor.js'
 import { firstJsonObject } from './json-extractor.js'
+
+export function parseWorkerOutput(raw: string, packet: UCP, workerId: string): Artifact {
+  return packet.act === 'work'
+    ? buildWorkArtifact(raw.trim(), packet, workerId)
+    : buildJudgmentArtifact(raw.trim(), packet, workerId)
+}
 
 function parseSeverity(v: unknown): ReviewSeverity {
   return v === 'R' || v === 'Y' || v === 'G' ? v : 'Y'
