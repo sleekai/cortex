@@ -151,7 +151,7 @@ Options:
   --max-escalation  Loop: max escalation depth (default: ${DEFAULT_BOUNDS.maxEscalationDepth})
   --max-cost        Loop: cost ceiling in relative units (default: uncapped)
   --triage       Run the Triage Skill System first (env: CORTEX_TRIAGE)
-  --provider,-p  Worker template (openai, anthropic, ollama, cli, http)
+  --provider,-p  Worker template (openai, anthropic, chatgpt, ollama, cli, http)
   --id,-n        Worker id (default: derived from provider)
   --model        Model name (for openai/anthropic/ollama templates)
   --api-key,-k   API key (for openai/anthropic templates; falls back to env)
@@ -550,12 +550,12 @@ function buildSpecFromFlags(args: CliArgs): WorkerSpec {
       })
     case 'opencode':
       return opencodeAdapter({
-        id: workerId, model: args.model,
+        id: workerId,
         writeAccess: (args.writeAccess as 'none' | 'patch') ?? 'patch',
       })
     case 'claude-cli':
       return claudeCliAdapter({
-        id: workerId, model: args.model,
+        id: workerId,
         writeAccess: (args.writeAccess as 'none' | 'patch') ?? 'patch',
       })
     case 'cli':
@@ -605,14 +605,12 @@ async function commandAddWorker(args: CliArgs): Promise<void> {
         process.stdout.write('\n── opencode adapter ────────────────────────────\n')
         spec = opencodeAdapter({
           id: await ask(rli, 'Worker id', 'opencode'),
-          model: await ask(rli, 'Model/provider (leave empty for default)', '') || undefined,
         })
         break
       case 'claude-cli':
         process.stdout.write('\n── claude-cli adapter ───────────────────────────\n')
         spec = claudeCliAdapter({
           id: await ask(rli, 'Worker id', 'claude-cli'),
-          model: await ask(rli, 'Model (leave empty for default)', '') || undefined,
         })
         break
       case 'openai': spec = await promptOpenAi(rli); break
