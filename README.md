@@ -45,9 +45,10 @@ call with different bounds.
 - **CUEA loop** — Producer → Evaluator → Router cycle: apply → hooks →
   error-only retry or ladder escalation under explicit bounds
 
-See [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md) for subsystem designs and
+See [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md) for subsystem designs,
 [docs/AUDIT.md](./docs/AUDIT.md) for the repository audit, gap analysis, and
-deliberate deferrals.
+deliberate deferrals, [CONTEXT.md](./CONTEXT.md) for the domain glossary,
+and [docs/adr/](./docs/adr/) for architecture decision records.
 
 ## Commands
 

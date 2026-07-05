@@ -82,9 +82,10 @@ Contract:
   `clarification` artifact. `'stop'` ends the blueprint unaccepted.
 - `data` is merged into the shared blackboard under the skill's name — the
   composition mechanism between skills.
-- CTS stages (`src/triage/skill.ts`: `TriageStage`) are a different, narrower
-  contract: they are *stages inside* the triage pipeline. The whole triage
-  pipeline is one execution Skill here.
+- CTS stages (`src/triage/stage.ts`: `TriageStage`, registered via
+  `registerStage`) are a different, narrower contract: they are *stages
+  inside* the triage pipeline. The whole triage pipeline is one execution
+  Skill here.
 
 ## Blueprint API (`src/blueprint/blueprint.ts`)
 
