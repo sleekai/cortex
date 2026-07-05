@@ -1,0 +1,184 @@
+// CUEA Execution Loop Engine (spec §3) — the closed loop:
+//
+//   Producer → Evaluator → Router
+//        ↑                    ↓
+//        └──── loop / escalate / finish
+//
+// The engine wires the three seams and owns nothing else: the Producer makes
+// output, the Evaluator judges it, the Router alone decides the next move. The
+// engine only advances the ladder rung when the Router says "escalate" and
+// stops when it says "finish" — there is no other exit. Constraints §10 hold
+// structurally: the single bounded `while` has no recursion, every output is
+// evaluated before the Router runs, and no worker calls another worker.
+import { type UCP } from '../packet/ucp.js'
+import { type CodeChunk, type ValidationResult } from '../core/types.js'
+import { type Artifact, isKind } from '../artifact/artifacts.js'
+import { type ScoredWorker } from '../capability/planner.js'
+import { dispatchWithLadder, type DispatchOptions, DEFAULT_DISPATCH_OPTIONS } from '../worker/dispatch.js'
+import { applyPatch, runValidationHooks } from '../validator/patch-apply.js'
+import { generateErrorPacket } from '../packet/generator.js'
+import {
+  type ExecutionState,
+  initialState,
+  recordAttempt,
+  escalate,
+  finish,
+} from './execution-state.js'
+import { type Evaluator, hookDecisionEvaluator } from './evaluator.js'
+import { type RouterBounds, type RouterAction, DEFAULT_BOUNDS, route } from './router.js'
+import { info, warn } from '../core/logger.js'
+
+// What the Producer receives each attempt. `rung` is the ladder index the
+// Router has escalated to; `issues` are the previous Evaluation's complaints,
+// for same-tier refinement.
+export interface ProducerContext {
+  packet: UCP
+  chunks: CodeChunk[]
+  rung: number
+  attempt: number
+  issues: string[]
+}
+
+export interface Production {
+  artifact: Artifact
+  workerId: string
+  tier: number
+  // Spend for this attempt in relative cost units (accrued into state.cost).
+  cost: number
+  latencyMs: number
+  // Deterministic validation of the output, when applicable (patches).
+  validation?: ValidationResult
+}
+
+// A Producer is stateless (spec §4): it maps a context to one output and holds
+// no memory between attempts — all continuity lives in ExecutionState.
+export type Producer = (ctx: ProducerContext) => Promise<Production>
+
+export interface LoopStep {
+  action: RouterAction
+  state: ExecutionState
+}
+
+export interface LoopEngineOptions {
+  bounds?: RouterBounds
+  evaluator?: Evaluator
+  // Number of ladder rungs available; escalation past the last rung ends the
+  // loop rather than re-dispatching the top worker forever.
+  ladderSize: number
+  onStep?: (step: LoopStep) => void
+}
+
+export interface LoopEngineResult {
+  state: ExecutionState
+  accepted: boolean
+  terminationReason: string
+  finalOutput: Artifact | null
+}
+
+export async function runExecutionLoop(
+  packet: UCP,
+  chunks: CodeChunk[],
+  producer: Producer,
+  options: LoopEngineOptions,
+): Promise<LoopEngineResult> {
+  const bounds = options.bounds ?? DEFAULT_BOUNDS
+  const evaluator = options.evaluator ?? hookDecisionEvaluator
+  const ladderSize = Math.max(1, options.ladderSize)
+
+  let state = initialState()
+  let rung = 0
+  let issues: string[] = []
+
+  // Bounded by construction: the Router terminates on ACCEPT/FINISH, on any
+  // §6 bound, or on convergence; escalation is capped by both the depth bound
+  // and the physical ladder. The extra guard mirrors maxIterations so a
+  // malformed custom Router can never spin forever.
+  for (let guard = 0; guard <= bounds.maxIterations; guard++) {
+    const production = await producer({ packet, chunks, rung, attempt: state.iteration, issues })
+    const evaluation = await evaluator({
+      output: production.artifact,
+      validation: production.validation,
+      attempt: state.iteration,
+    })
+
+    state = recordAttempt(state, {
+      iteration: state.iteration + 1,
+      workerId: production.workerId,
+      tier: production.tier,
+      decision: evaluation.decision,
+      confidence: evaluation.confidence,
+      issues: evaluation.issues,
+      cost: production.cost,
+      latencyMs: production.latencyMs,
+    }, production.artifact)
+
+    const action = route(state, evaluation, bounds)
+    info(`loop: iter ${state.iteration} tier ${production.tier} → ${evaluation.decision} (conf ${evaluation.confidence.toFixed(2)}) ⇒ ${action.action}`)
+    options.onStep?.({ action, state })
+
+    if (action.action === 'finish') {
+      state = finish(state, state.escalationDepth > 0 ? 'escalated' : 'finished')
+      return { state, accepted: action.accepted, terminationReason: action.reason, finalOutput: state.currentOutput }
+    }
+
+    if (action.action === 'escalate') {
+      if (rung + 1 >= ladderSize) {
+        warn('loop: escalation requested but ladder exhausted — finishing')
+        state = finish(state, 'escalated')
+        return { state, accepted: false, terminationReason: 'ladder exhausted (no higher-tier worker)', finalOutput: state.currentOutput }
+      }
+      rung++
+      state = escalate(state)
+    }
+
+    // 'loop' and 'escalate' both carry the issues forward as refinement context.
+    issues = evaluation.issues
+  }
+
+  // Unreachable when the Router honors maxIterations; kept as a hard backstop.
+  state = finish(state, state.escalationDepth > 0 ? 'escalated' : 'finished')
+  return { state, accepted: false, terminationReason: 'iteration guard tripped', finalOutput: state.currentOutput }
+}
+
+// ── Default Producer: dispatch a single ladder rung ───────────────────────
+// Escalation is the Router's job, so this Producer dispatches exactly ONE rung
+// (never walks the ladder itself). It applies a patch artifact and runs the
+// project's validation hooks so the Evaluator gets a deterministic verdict.
+// Retries at the same rung swap in an error-only packet, matching the existing
+// validation loop's refinement strategy.
+export function ladderProducer(
+  ladder: ScoredWorker[],
+  projectRoot: string,
+  dispatchOptions: DispatchOptions = DEFAULT_DISPATCH_OPTIONS,
+): Producer {
+  return async (ctx: ProducerContext): Promise<Production> => {
+    const idx = Math.min(ctx.rung, ladder.length - 1)
+    const scored = ladder[idx]!
+
+    // On a same-tier retry, hand the worker the failing errors, not the whole
+    // context again — the packet already delivered the goal once.
+    const packet = ctx.attempt > 0 && ctx.issues.length > 0
+      ? generateErrorPacket(ctx.packet.t, ctx.packet.g, ctx.issues.join('\n').slice(0, 600), ctx.issues[0]!, ctx.attempt)
+      : ctx.packet
+    const chunks = ctx.attempt > 0 && ctx.issues.length > 0 ? [] : ctx.chunks
+
+    const result = await dispatchWithLadder(packet, chunks, [scored], dispatchOptions)
+
+    let validation: ValidationResult | undefined
+    if (isKind(result.artifact, 'patch')) {
+      const applied = applyPatch(result.artifact.body.diff, projectRoot)
+      validation = applied
+        ? runValidationHooks(projectRoot)
+        : { passed: false, errors: ['patch apply failed'], output: '', iteration: ctx.attempt + 1 }
+    }
+
+    return {
+      artifact: result.artifact,
+      workerId: result.workerId,
+      tier: scored.worker.tier,
+      cost: scored.expectedSpend,
+      latencyMs: result.latencyMs,
+      validation,
+    }
+  }
+}

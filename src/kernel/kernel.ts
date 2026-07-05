@@ -16,6 +16,9 @@ import { generateWorkPacket } from '../packet/generator.js'
 import { enforceBudget, type BudgetResult } from '../packet/budget-controller.js'
 import { type UCP } from '../packet/ucp.js'
 import { runValidationLoop, type LoopResult } from '../validator/validation-loop.js'
+import { runExecutionLoop, ladderProducer, type LoopEngineResult } from '../loop/loop-engine.js'
+import { type RouterBounds } from '../loop/router.js'
+import { isKind } from '../artifact/artifacts.js'
 import { loadState, saveArtifact, updateState } from '../state/store.js'
 import { appendMetric, reliabilityOverrides } from '../state/metrics.js'
 import { info, warn } from '../core/logger.js'
@@ -119,4 +122,49 @@ export async function runTask(task: string, config: KernelConfig): Promise<TaskO
   updateState(config.projectRoot, prepared.ucp.t, result.patch, prepared.budgeted.chunks, result.iterations)
 
   return { kind: 'completed', intent: prepared.intent, plan: prepared.plan, ucp: prepared.ucp, result }
+}
+
+// ── CUEA closed-loop entry ────────────────────────────────────────────────
+// The Producer → Evaluator → Router loop over the same prepared dispatch that
+// runTask uses. Unlike runTask (which delegates escalation to the ladder walk
+// inside a fixed 3-iteration validation loop), runLoop lets the Router own
+// every continuation decision under the §6 bounds. Persistence is identical:
+// the final artifact and task state land under .cortex/ exactly as runTask.
+export interface LoopConfig extends KernelConfig {
+  bounds?: RouterBounds
+}
+
+export type LoopOutcome =
+  | { kind: 'pointers'; intent: TaskIntent; plan: Plan; pointers: string[] }
+  | { kind: 'refused'; intent: TaskIntent; plan: Plan; reason: string }
+  | { kind: 'looped'; intent: TaskIntent; plan: Plan; ucp: UCP; result: LoopEngineResult }
+
+export async function runLoop(task: string, config: LoopConfig): Promise<LoopOutcome> {
+  const prepared = prepareDispatch(task, config)
+  if (prepared.kind === 'pointers') {
+    return { kind: 'pointers', intent: prepared.intent, plan: prepared.plan, pointers: prepared.pointers }
+  }
+  if (prepared.kind === 'refused') {
+    return { kind: 'refused', intent: prepared.intent, plan: prepared.plan, reason: prepared.reason }
+  }
+
+  info('starting CUEA execution loop...')
+  const producer = ladderProducer(prepared.plan.ladder, config.projectRoot, {
+    timeoutMs: config.timeoutMs ?? 180_000,
+    maxOutputBytes: config.maxOutputBytes ?? 10 * 1024 * 1024,
+    onMetric: (record) => appendMetric(config.projectRoot, record),
+  })
+
+  const result = await runExecutionLoop(prepared.ucp, prepared.budgeted.chunks, producer, {
+    ...(config.bounds ? { bounds: config.bounds } : {}),
+    ladderSize: prepared.plan.ladder.length,
+  })
+
+  if (result.finalOutput) {
+    saveArtifact(config.projectRoot, result.finalOutput)
+  }
+  const patch = result.finalOutput && isKind(result.finalOutput, 'patch') ? result.finalOutput.body.diff : ''
+  updateState(config.projectRoot, prepared.ucp.t, patch, prepared.budgeted.chunks, result.state.iteration)
+
+  return { kind: 'looped', intent: prepared.intent, plan: prepared.plan, ucp: prepared.ucp, result }
 }

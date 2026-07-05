@@ -10,12 +10,16 @@ This plan follows the audit in `docs/AUDIT.md`. Guiding rule from the audit:
 validation loop, and stateless one-shot discipline survive intact; everything
 implicit becomes explicit and typed.
 
-Status (2026-07): phases 1–5 below are implemented and tested. The kernel is
-extracted (`src/kernel/kernel.ts`); the DAG executor supports checkpointing,
+Status (2026-07): phases 1–6 below are implemented and tested — the
+original 5-phase plan plus the CUEA closed-loop execution engine. The kernel
+is extracted (`src/kernel/kernel.ts`); the DAG executor supports checkpointing,
 resume, and cooperative cancellation. A state-graph layer (`src/graph/`) adds
 dynamic control flow above dispatch — reducer channels, conditional routing,
 Send fan-out, bounded cycles, interrupt/resume — adopting LangGraph's proven
-ideas without its dependencies (see "State graph" below). `docs/AUDIT.md` §4
+ideas without its dependencies (see "State graph" below). The CUEA loop
+(`src/loop/`) wraps the Producer→Evaluator→Router cycle around the same
+prepared dispatch pipeline, handing every continuation decision to the Router
+under explicit bounds (see "CUEA execution loop" below). `docs/AUDIT.md` §4
 records what is deliberately deferred and why (call/dependency-graph
 retrieval, embeddings, additional protocol harnesses, a persistent repository
 index).
@@ -44,15 +48,24 @@ The spec invites improvement where a superior design exists. Three deviations:
 ## Module map
 
 ```
-skills/ucp-toolchain/implementation/   (package: cortex)
+cortex   (package: @sleekai/cortex)
   src/
     kernel/
-      kernel.ts         the one pipeline: planTask | prepareDispatch | runTask;
-                        CLI and MCP server are thin surfaces over it
+      kernel.ts         the one pipeline: planTask | prepareDispatch | runTask |
+                        runLoop; CLI and MCP server are thin surfaces over it
     core/
       types.ts          shared primitives (chunks, budgets) — extended, kept
       logger.ts         kept
       tokens.ts         single token-estimation source (dedup of 2 copies)
+    loop/
+      execution-state.ts  ExecutionState record + pure reducers (iteration,
+                          cost, escalationDepth, history, status)
+      evaluator.ts      pure EvaluatorInput → Evaluation (ACCEPT/RETRY/ESCALATE/
+                        FINISH); default hook-decision evaluator
+      router.ts         pure state+eval → RouterAction; all termination
+                        guarantees (bounds, convergence) live here
+      loop-engine.ts    bounded Producer→Evaluator→Router while-loop;
+                        ladderProducer dispatches one rung per loop body
     artifact/
       artifacts.ts      typed Artifact union + guards + (de)serialization
     packet/
@@ -279,6 +292,69 @@ engine owns persistence), thread ids (a checkpoint is a plain JSON value),
 and runnable/message abstractions (a node is a function; artifacts are the
 currency).
 
+### CUEA execution loop (`loop/`)
+
+A closed-loop execution engine (Cortex Unified Execution Architecture): a
+**Producer → Evaluator → Router** cycle that iteratively refines, escalates, or
+terminates on evaluation feedback (spec §3–§5). Where the validation loop
+(`validator/validation-loop.ts`) delegates escalation to `dispatchWithLadder`'s
+internal walk inside a fixed 3-iteration cap, the CUEA loop hands **every**
+continuation decision to the Router under explicit bounds (§6).
+
+- **Execution state** (`execution-state.ts`) — the mandated record
+  `{ iteration, cost, escalationDepth, history, currentOutput, status }`.
+  Data only; every transition is a pure reducer (`recordAttempt` -> bumps
+  iteration and accrues cost; `escalate` -> bumps depth; `finish` -> sets
+  status). `status` is `'running' | 'finished' | 'escalated'` — the last marks a
+  task that climbed the ladder before stopping (distinguished by §11 success
+  criteria).
+- **Evaluator** (`evaluator.ts`) — a pure `EvaluatorInput → Evaluation`
+  `({ decision: 'ACCEPT'|'RETRY'|'ESCALATE'|'FINISH', confidence, issues })`.
+  Purity is what keeps the loop deterministic under identical inputs: the
+  default `hookDecisionEvaluator` maps an artifact plus a pre-computed
+  `ValidationResult` to a decision (patch+pass → ACCEPT, patch+fail → RETRY,
+  recoverable failure → ESCALATE, unrecoverable → FINISH, non-patch artifacts
+  → ACCEPT). An LLM-as-judge is a drop-in `Evaluator` at the cost of that
+  determinism. Confidence in RETRY verdicts scales inversely with error count
+  (fewer errors → higher confidence it's a near-miss, not a bad approach).
+- **Router** (`router.ts`) — the *only* component that continues the loop.
+  A pure `(state, evaluation) → RouterAction` function with deliberate
+  precedence: a decisive Evaluator verdict (ACCEPT/FINISH) wins immediately,
+  then hard bounds (§6) fire (they can only STOP the loop, never extend it),
+  then convergence heuristics check for stability (same-tier confidence Δ <
+  2% → stable) or negligible improvement (Δ confidence ≤ 1% and no fewer
+  issues → spinning), and only then are RETRY/ESCALATE honored within their
+  bounds (max 3 escalation depth, configurable). Bounds are always checked
+  before honoring a RETRY, so iteration can never push past maxIterations.
+  Cross-tier confidence plateaus never stall escalation — stability is gated
+  on same-tier comparisons only. RouterBounds are all configurable:
+
+```ts
+interface RouterBounds {
+  maxIterations: number       // default 5
+  maxEscalationDepth: number  // default 3
+  maxCost: number             // relative cost units, default ∞
+  confidenceEpsilon: number   // default 0.02
+  improvementEpsilon: number  // default 0.01
+}
+```
+
+- **Loop engine** (`loop-engine.ts`) — wires the three seams in a single
+  bounded `while`; advances the ladder rung only on `escalate`, stops only on
+  `finish`. Contains a hard iteration guard as backstop (mirrors
+  `maxIterations` so a malformed custom Router can never spin forever). The
+  default `ladderProducer` dispatches exactly **one** rung per loop body (never
+  walking the ladder itself — escalation is the Router's job), applies a patch
+  artifact and runs the project's hooks so the Evaluator gets a deterministic
+  verdict, and swaps in an error-only packet on same-tier retries. Constraints
+  hold structurally: every output is evaluated before the Router runs, no
+  recursion, and no worker invokes another worker.
+
+Kernel entry: `runLoop` (`kernel/kernel.ts`) — same `prepareDispatch` pipeline,
+budget, and persistence path as `runTask`, but with the Router driving instead
+of the fixed validation loop. Exposed programmatically (not yet wired to the
+CLI — add via `cortex run --loop`).
+
 ### State engine & learning (`state/`)
 
 `.cortex/` in the target project:
@@ -319,6 +395,14 @@ same fields it already documents, now typed and validated by the kernel.
 4. **Memory** — context compiler levels, state engine, metrics + learning.
 5. **Surface** — CLI (`run|plan|locate|workers|metrics`), validation-loop
    rewire, tests green, SKILL.md + README updates, migration notes.
+
+6. **Closed-loop execution** — CUEA loop: execution state, evaluator, router,
+   loop engine + ladderProducer; `runLoop` kernel entry; router-bound
+   termination (maxIterations, maxEscalationDepth, maxCost, convergence
+   heuristics); deterministic under identical inputs by construction;
+   `test/router.test.ts` (12 unit tests), `test/loop-engine.test.ts`
+   (integration: accept, retry, escalate, max iterations, ladder exhaustion,
+   determinism).
 
 Each phase compiles and tests green before the next begins.
 
