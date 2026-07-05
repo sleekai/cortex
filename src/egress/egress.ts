@@ -233,6 +233,58 @@ export function renderDispatchSummary(summary: DispatchSummary, options: EgressO
   return lines.join('\n')
 }
 
+// CUEA loop result (spec §8): the final artifact plus loop telemetry — status,
+// iteration/escalation counts, accrued cost, and the worker path the Router
+// walked. Mirrors renderDispatchSummary's frame so both surfaces read alike.
+export interface LoopSummary {
+  taskId: string
+  goal: string
+  status: string
+  accepted: boolean
+  iterations: number
+  escalationDepth: number
+  cost: number
+  terminationReason: string
+  workerPath: string[]
+  finalReasoning: string
+  patchLength: number
+  issues: string[]
+}
+
+export function renderLoopSummary(summary: LoopSummary, options: EgressOptions): string {
+  if (options.targetKind === 'mcp') {
+    return JSON.stringify(summary)
+  }
+  const verdict = summary.accepted ? 'ACCEPTED' : 'STOPPED'
+  const border = '═'.repeat(60)
+  const lines: string[] = [
+    '',
+    border,
+    `  CORTEX LOOP: ${verdict}  (${summary.status})`,
+    border,
+    `  Task:    ${summary.taskId}`,
+    `  Goal:    ${summary.goal}`,
+    `  Stop:    ${summary.terminationReason}`,
+    '',
+    `  Iter:    ${summary.iterations}   Escalations: ${summary.escalationDepth}   Cost: ${summary.cost.toFixed(2)}`,
+    `  Patch:   ${summary.patchLength > 0 ? `${summary.patchLength} chars` : 'none'}`,
+    `  Reason:  ${summary.finalReasoning || 'none'}`,
+  ]
+  if (summary.workerPath.length > 0) {
+    lines.push('', '  Path:')
+    for (const step of summary.workerPath) lines.push(`    → ${step}`)
+  }
+  if (!summary.accepted && summary.issues.length > 0) {
+    lines.push('', '  Open issues:')
+    for (const e of summary.issues) lines.push(`    - ${e}`)
+  }
+  if (options.includeMetadata && options.metadata) {
+    lines.push('', ...metadataBlock(options.metadata))
+  }
+  lines.push(border, '')
+  return lines.join('\n')
+}
+
 export function renderPlanSummary(data: object, options: EgressOptions): string {
   return options.targetKind === 'mcp'
     ? JSON.stringify(data)

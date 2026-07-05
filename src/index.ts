@@ -15,14 +15,16 @@ import { compileIntent } from './capability/intent-compiler.js'
 import { loadRegistry } from './worker/registry.js'
 import { compileContext } from './retrieval/context-compiler.js'
 import { buildPrompt } from './worker/prompt.js'
-import { planTask, prepareDispatch, runTask } from './kernel/kernel.js'
+import { planTask, prepareDispatch, runTask, runLoop, type LoopConfig } from './kernel/kernel.js'
+import { DEFAULT_BOUNDS, type RouterBounds } from './loop/router.js'
+import { isKind } from './artifact/artifacts.js'
 import { initProject } from './state/store.js'
 import { readMetrics, aggregateStats } from './state/metrics.js'
 import { createHarness } from './harness/harness.js'
 import { TEMPLATES, type TemplateKind, openAiTemplate, anthropicTemplate, chatGptTemplate, ollamaTemplate, cliTemplate, httpTemplate, opencodeAdapter, claudeCliAdapter } from './worker/templates.js'
 import { type WorkerSpec } from './worker/registry.js'
 import { normalizeInput as ingressNormalize } from './ingress/ingress.js'
-import { renderDispatchSummary, renderPlanSummary, renderPointerList } from './egress/egress.js'
+import { renderDispatchSummary, renderLoopSummary, renderPlanSummary, renderPointerList } from './egress/egress.js'
 // Triage Skill System (CTS) — opt-in pre-execution cognitive filter. The
 // side-effect import registers the built-in skills; runTriage is only called
 // when --triage / CORTEX_TRIAGE is set, so the pipeline is inert by default.
@@ -33,7 +35,7 @@ import * as fs from 'node:fs'
 import * as path from 'node:path'
 
 interface CliArgs {
-  command: 'run' | 'dispatch' | 'plan' | 'locate' | 'workers' | 'metrics' | 'init' | 'add-worker'
+  command: 'run' | 'dispatch' | 'loop' | 'plan' | 'locate' | 'workers' | 'metrics' | 'init' | 'add-worker'
   task: string
   goal?: string
   dir?: string
@@ -41,6 +43,10 @@ interface CliArgs {
   budget?: string
   timeout?: string
   dryRun?: boolean
+  // loop (CUEA) bounds
+  maxIter?: string
+  maxEscalation?: string
+  maxCost?: string
   // add-worker specific
   provider?: string
   workerId?: string
@@ -52,7 +58,7 @@ interface CliArgs {
   triage?: boolean
 }
 
-const COMMANDS = new Set(['run', 'dispatch', 'plan', 'locate', 'workers', 'metrics', 'init', 'add-worker'])
+const COMMANDS = new Set(['run', 'dispatch', 'loop', 'plan', 'locate', 'workers', 'metrics', 'init', 'add-worker'])
 
 const COMMAND_ALIASES: Record<string, CliArgs['command']> = {
   run: 'dispatch',
@@ -81,6 +87,12 @@ function parseArgs(raw: string[]): CliArgs {
       args.budget = raw[++i]!
     } else if (arg === '--timeout' && i + 1 < raw.length) {
       args.timeout = raw[++i]!
+    } else if (arg === '--max-iter' && i + 1 < raw.length) {
+      args.maxIter = raw[++i]!
+    } else if (arg === '--max-escalation' && i + 1 < raw.length) {
+      args.maxEscalation = raw[++i]!
+    } else if (arg === '--max-cost' && i + 1 < raw.length) {
+      args.maxCost = raw[++i]!
     } else if (arg === '--dry-run') {
       args.dryRun = true
     } else if (arg === '--triage') {
@@ -115,6 +127,7 @@ function printHelp(): void {
 Usage:
   cortex init [options]              scaffold .cortex/ state directory
   cortex dispatch|run <task> [opts]  dispatch a task (run is alias)
+  cortex loop <task> [options]       CUEA closed loop: Producer→Evaluator→Router
   cortex plan <task> [options]       print intent + dispatch plan, no model call
   cortex locate <keywords> [options] tier-0 deterministic pointers, no model call
   cortex workers [options]           list registered workers + availability
@@ -134,6 +147,9 @@ Options:
   --budget       Max input tokens (default: ${DEFAULT_BUDGET.maxInputTokens})
   --timeout      Worker timeout in ms (default: 180000)
   --dry-run      Print packet + prompt and exit (no model call, no patch)
+  --max-iter        Loop: max iterations (default: ${DEFAULT_BOUNDS.maxIterations})
+  --max-escalation  Loop: max escalation depth (default: ${DEFAULT_BOUNDS.maxEscalationDepth})
+  --max-cost        Loop: cost ceiling in relative units (default: uncapped)
   --triage       Run the Triage Skill System first (env: CORTEX_TRIAGE)
   --provider,-p  Worker template (openai, anthropic, ollama, cli, http)
   --id,-n        Worker id (default: derived from provider)
@@ -147,6 +163,7 @@ Options:
 Examples:
   cortex init
   cortex dispatch "add JWT auth middleware to Express app"
+  cortex loop "refactor the parser" --max-iter 5 --max-escalation 2
   cortex plan --task "fix login form validation" --dir ./my-app
   cortex locate "budget enforcement" --dir .
   cortex add-worker openai --model gpt-4o-mini --id openai-cheap
@@ -233,6 +250,76 @@ async function commandRun(args: CliArgs): Promise<void> {
   const egressOut = renderDispatchSummary(summary, { targetKind: 'cli' })
   process.stdout.write(egressOut)
   if (!outcome.result.success) {
+    process.exit(1)
+  }
+}
+
+// Build RouterBounds from flags, falling back to DEFAULT_BOUNDS per field so a
+// partial override (just --max-iter, say) keeps the other guarantees intact.
+function boundsFromFlags(args: CliArgs): RouterBounds {
+  return {
+    ...DEFAULT_BOUNDS,
+    ...(args.maxIter ? { maxIterations: parseInt(args.maxIter, 10) } : {}),
+    ...(args.maxEscalation ? { maxEscalationDepth: parseInt(args.maxEscalation, 10) } : {}),
+    ...(args.maxCost ? { maxCost: parseFloat(args.maxCost) } : {}),
+  }
+}
+
+// `cortex loop` — the CUEA closed-loop executor. Same ingress/plan/budget path
+// as dispatch, but the Router owns every continuation decision under the §6
+// bounds instead of the fixed 3-iteration validation loop.
+async function commandLoop(args: CliArgs): Promise<void> {
+  if (args.stateDir) process.env['CORTEX_DIR'] = args.stateDir
+  const projectRoot = args.dir ?? process.cwd()
+  const budget = args.budget ? parseInt(args.budget, 10) : DEFAULT_BUDGET.maxInputTokens
+  const timeout = args.timeout ? parseInt(args.timeout, 10) : 180_000
+  const budgetConfig: BudgetConfig = { ...DEFAULT_BUDGET, maxInputTokens: budget }
+
+  const ingressPacket = ingressNormalize({
+    content: args.task,
+    kind: 'cli',
+    explicitGoal: args.goal,
+    metadata: { projectRoot, budget: String(budget), timeout: String(timeout) },
+  })
+  const goal = ingressPacket.ucp.g
+  const { task } = applyTriage(ingressPacket, args)
+  const bounds = boundsFromFlags(args)
+  const config: LoopConfig = { projectRoot, goal, budget: budgetConfig, timeoutMs: timeout, bounds }
+
+  info(`project: ${projectRoot}`)
+  info(`task: ${task}`)
+  info(`bounds: maxIter=${bounds.maxIterations} maxEscalation=${bounds.maxEscalationDepth} maxCost=${bounds.maxCost}`)
+
+  const outcome = await runLoop(task, config)
+  if (outcome.kind === 'pointers') {
+    process.stdout.write(renderPointerList(outcome.pointers, { targetKind: 'cli' }) + '\n')
+    return
+  }
+  if (outcome.kind === 'refused') {
+    logError(`budget refused dispatch: ${outcome.reason}`)
+    process.exit(1)
+  }
+
+  const { result } = outcome
+  const final = result.finalOutput
+  const patch = final && isKind(final, 'patch') ? final.body : { diff: '', reasoning: '' }
+  const lastIssues = result.state.history[result.state.history.length - 1]?.issues ?? []
+  const egressOut = renderLoopSummary({
+    taskId: outcome.ucp.t,
+    goal: outcome.ucp.g,
+    status: result.state.status,
+    accepted: result.accepted,
+    iterations: result.state.iteration,
+    escalationDepth: result.state.escalationDepth,
+    cost: result.state.cost,
+    terminationReason: result.terminationReason,
+    workerPath: result.state.history.map(h => `${h.workerId} (tier ${h.tier}) → ${h.decision} @conf ${h.confidence.toFixed(2)}`),
+    finalReasoning: patch.reasoning,
+    patchLength: patch.diff.length,
+    issues: lastIssues,
+  }, { targetKind: 'cli' })
+  process.stdout.write(egressOut)
+  if (!result.accepted) {
     process.exit(1)
   }
 }
@@ -560,6 +647,7 @@ async function main(): Promise<void> {
 
   switch (args.command) {
     case 'dispatch': return commandRun(args)
+    case 'loop': return commandLoop(args)
     case 'plan': return commandPlan(args)
     case 'locate': return commandLocate(args)
     case 'workers': return commandWorkers(args)
