@@ -1,7 +1,7 @@
 // Task Normalizer (spec §4.1). Strips conversational noise, collapses
 // whitespace, and dedups repeated intent so downstream stages see one clean
 // task statement. Deterministic; no model calls.
-import { type CTS_Skill } from '../skill.js'
+import { type TriageStage } from '../skill.js'
 import { GREETING, POLITENESS, FILLER, splitClauses } from '../signals.js'
 
 function stripNoise(text: string): string {
@@ -33,7 +33,7 @@ function dedupClauses(text: string): string {
   return kept.join('. ')
 }
 
-export const normalizeSkill: CTS_Skill = {
+export const normalizeSkill: TriageStage = {
   name: 'normalize',
   purpose: 'Strip conversational noise and deduplicate intent into one clean task statement.',
   input_schema: { raw: 'string' },

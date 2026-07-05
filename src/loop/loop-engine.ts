@@ -14,7 +14,7 @@ import { type UCP } from '../packet/ucp.js'
 import { type CodeChunk, type ValidationResult } from '../core/types.js'
 import { type Artifact, isKind } from '../artifact/artifacts.js'
 import { type ScoredWorker } from '../capability/planner.js'
-import { dispatchWithLadder, type DispatchOptions, DEFAULT_DISPATCH_OPTIONS } from '../worker/dispatch.js'
+import { dispatchOne, type DispatchOptions, DEFAULT_DISPATCH_OPTIONS } from '../worker/dispatch.js'
 import { applyPatch, runValidationHooks } from '../validator/patch-apply.js'
 import { generateErrorPacket } from '../packet/generator.js'
 import {
@@ -26,6 +26,7 @@ import {
 } from './execution-state.js'
 import { type Evaluator, hookDecisionEvaluator } from './evaluator.js'
 import { type RouterBounds, type RouterAction, DEFAULT_BOUNDS, route } from './router.js'
+import { type ContextService } from './context-service.js'
 import { info, warn } from '../core/logger.js'
 
 // What the Producer receives each attempt. `rung` is the ladder index the
@@ -70,11 +71,11 @@ export interface LoopEngineOptions {
   ladderSize: number
   onStep?: (step: LoopStep) => void
   // Context-on-demand seam (MVP §6): when an Evaluation names missing context
-  // and the loop continues, the engine asks this provider for a refreshed
-  // chunk set before the next attempt. The provider owns policy (whether and
+  // and the loop continues, the engine asks this service for a refreshed
+  // chunk set before the next attempt. The service owns policy (whether and
   // how often to actually fetch) — returning the current chunks unchanged is
-  // a legal "no". Absent provider ⇒ behavior identical to before.
-  contextProvider?: (needs: string[], current: CodeChunk[]) => Promise<CodeChunk[]>
+  // a legal "no". Absent service ⇒ behavior identical to before.
+  contextService?: ContextService
 }
 
 export interface LoopEngineResult {
@@ -146,10 +147,10 @@ export async function runExecutionLoop(
     // 'loop' and 'escalate' both carry the issues forward as refinement context.
     issues = evaluation.issues
 
-    // Context-on-demand: the Evaluator expressed needs; the provider (which
-    // owns the context policy) decides whether the next attempt gets more.
-    if (evaluation.missingContext && evaluation.missingContext.length > 0 && options.contextProvider) {
-      const refreshed = await options.contextProvider(evaluation.missingContext, currentChunks)
+    // Context-on-demand: the Evaluator expressed needs; the context service
+    // decides whether the next attempt gets more.
+    if (evaluation.missingContext && evaluation.missingContext.length > 0 && options.contextService) {
+      const refreshed = await options.contextService.fetch(evaluation.missingContext, currentChunks)
       if (refreshed !== currentChunks) {
         currentChunks = refreshed
         contextRefreshed = true
@@ -187,7 +188,7 @@ export function ladderProducer(
       : ctx.packet
     const chunks = errorOnlyRetry ? [] : ctx.chunks
 
-    const result = await dispatchWithLadder(packet, chunks, [scored], dispatchOptions)
+    const result = await dispatchOne(packet, chunks, scored, dispatchOptions)
 
     let validation: ValidationResult | undefined
     if (isKind(result.artifact, 'patch')) {

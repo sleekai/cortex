@@ -1,10 +1,11 @@
 // Context-on-demand (MVP §6): the Evaluator expresses needs, the loop engine
-// consults its context provider, and the refreshed chunks reach the next
+// consults its context service, and the refreshed chunks reach the next
 // attempt as a full packet (not an errors-only retry).
 import { test } from 'node:test'
 import * as assert from 'node:assert/strict'
 import { runExecutionLoop, type Producer, type ProducerContext } from '../src/loop/loop-engine.js'
 import { type Evaluation, type Evaluator, extractMissingContext, hookDecisionEvaluator } from '../src/loop/evaluator.js'
+import { type ContextService } from '../src/loop/context-service.js'
 import { makeArtifact } from '../src/artifact/artifacts.js'
 import { type UCP } from '../src/packet/ucp.js'
 import { type CodeChunk } from '../src/core/types.js'
@@ -36,19 +37,22 @@ function recordingProducer(seen: ProducerContext[]): Producer {
   }
 }
 
-test('missing context triggers the provider; next attempt sees merged chunks', async () => {
+test('missing context triggers the context service; next attempt sees merged chunks', async () => {
   const seen: ProducerContext[] = []
   const asked: string[][] = []
+  const service: ContextService = {
+    async fetch(needs, current) {
+      asked.push(needs)
+      return [...current, chunk('authFlow')]
+    },
+  }
   const r = await runExecutionLoop(packet, [chunk('a')], recordingProducer(seen), {
     evaluator: scriptedEvaluator([
       { decision: 'RETRY', confidence: 0.4, issues: ['cannot find name authFlow'], missingContext: ['authFlow'] },
       { decision: 'ACCEPT', confidence: 1, issues: [] },
     ]),
     ladderSize: 2,
-    contextProvider: async (needs, current) => {
-      asked.push(needs)
-      return [...current, chunk('authFlow')]
-    },
+    contextService: service,
   })
   assert.equal(r.accepted, true)
   assert.deepEqual(asked, [['authFlow']])
@@ -58,22 +62,25 @@ test('missing context triggers the provider; next attempt sees merged chunks', a
   assert.equal(seen[1]!.contextRefreshed, true) // producer told to resend full packet
 })
 
-test('provider returning current chunks unchanged is a policy "no"', async () => {
+test('context service returning current chunks unchanged is a policy "no"', async () => {
   const seen: ProducerContext[] = []
+  const noopService: ContextService = {
+    async fetch(_needs, current) { return current },
+  }
   const r = await runExecutionLoop(packet, [chunk('a')], recordingProducer(seen), {
     evaluator: scriptedEvaluator([
       { decision: 'RETRY', confidence: 0.4, issues: ['cannot find name x'], missingContext: ['x'] },
       { decision: 'ACCEPT', confidence: 1, issues: [] },
     ]),
     ladderSize: 2,
-    contextProvider: async (_needs, current) => current, // policy declined
+    contextService: noopService,
   })
   assert.equal(r.accepted, true)
   assert.equal(seen[1]!.contextRefreshed ?? false, false)
   assert.equal(seen[1]!.chunks.length, 1)
 })
 
-test('no provider means behavior is unchanged', async () => {
+test('no context service means behavior is unchanged', async () => {
   const seen: ProducerContext[] = []
   const r = await runExecutionLoop(packet, [chunk('a')], recordingProducer(seen), {
     evaluator: scriptedEvaluator([

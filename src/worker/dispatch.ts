@@ -1,7 +1,7 @@
 // Dispatch planner: executes a DAG of packet dispatches — parallel where
-// dependencies allow, sequential where they don't — walking each node's
-// escalation ladder on recoverable failure. All execution is async; nothing
-// here knows what a worker is beyond its harness.
+// dependencies allow, sequential where they don't. Escalation is handled by
+// the CUEA loop; dispatchOne is single-rung only. All execution is async;
+// nothing here knows what a worker is beyond its harness.
 import { type UCP } from '../packet/ucp.js'
 import { type CodeChunk } from '../core/types.js'
 import { type Artifact, makeArtifact, isKind } from '../artifact/artifacts.js'
@@ -54,99 +54,64 @@ export const DEFAULT_DISPATCH_OPTIONS: DispatchOptions = {
   maxOutputBytes: 10 * 1024 * 1024,
 }
 
-// Walk the escalation ladder for one packet: dispatch rung 0; escalate to the
-// next rung only on recoverable failure. Unrecoverable failures (IMPOSSIBLE,
-// oracle fail) stop the walk — a smarter model wouldn't fix a broken packet.
-export async function dispatchWithLadder(
+// Dispatch a single packet to one worker. Escalation is the CUEA loop's
+// responsibility — this function owns one-shot dispatch only.
+export async function dispatchOne(
   packet: UCP,
   chunks: CodeChunk[],
-  ladder: ScoredWorker[],
+  worker: ScoredWorker,
   options: DispatchOptions = DEFAULT_DISPATCH_OPTIONS,
 ): Promise<NodeResult> {
-  if (ladder.length === 0) {
+  const prompt = buildPrompt(packet, chunks)
+  const estInputTokens = estimateTokens(prompt)
+  const harness = createHarness(worker.worker.harness)
+
+  if (!harness.available()) {
     return {
       nodeId: packet.t,
-      workerId: 'kernel',
+      workerId: worker.worker.id,
       artifact: makeArtifact('failure', packet.t, 'kernel', {
-        reason: 'no feasible worker for this intent',
-        recoverable: false,
+        reason: `worker ${worker.worker.id} unavailable`,
+        recoverable: true,
       }),
       latencyMs: 0,
       attempts: 0,
     }
   }
 
-  const prompt = buildPrompt(packet, chunks)
-  const estInputTokens = estimateTokens(prompt)
-  let attempts = 0
-  let totalLatency = 0
-  let lastArtifact: Artifact | null = null
-  let lastWorkerId = ladder[0]!.worker.id
-
-  for (const rung of ladder) {
-    if (options.signal?.aborted) {
-      return {
-        nodeId: packet.t,
-        workerId: lastWorkerId,
-        artifact: makeArtifact('failure', packet.t, 'kernel', { reason: 'cancelled', recoverable: true }),
-        latencyMs: totalLatency,
-        attempts,
-      }
+  if (options.signal?.aborted) {
+    return {
+      nodeId: packet.t,
+      workerId: worker.worker.id,
+      artifact: makeArtifact('failure', packet.t, 'kernel', { reason: 'cancelled', recoverable: true }),
+      latencyMs: 0,
+      attempts: 0,
     }
-    const worker = rung.worker
-    const harness = createHarness(worker.harness)
-
-    if (!harness.available()) {
-      warn(`dispatch: worker ${worker.id} unavailable, escalating`)
-      continue
-    }
-
-    attempts++
-    lastWorkerId = worker.id
-    info(`dispatch: ${packet.t} → ${worker.id} (tier ${worker.tier}, ${rung.justification})`)
-
-    const result = await harness.invoke({ prompt, timeoutMs: options.timeoutMs, maxOutputBytes: options.maxOutputBytes })
-    totalLatency += result.latencyMs
-
-    const artifact: Artifact = result.ok
-      ? parseWorkerOutput(result.output, packet, worker.id)
-      : makeArtifact('failure', packet.t, worker.id, { reason: result.failReason ?? 'harness failure', recoverable: true })
-
-    const failed = isKind(artifact, 'failure')
-    options.onMetric?.({
-      at: new Date().toISOString(),
-      taskId: packet.t,
-      workerId: worker.id,
-      tier: worker.tier,
-      act: packet.act,
-      ok: !failed,
-      latencyMs: result.latencyMs,
-      estInputTokens,
-      estOutputTokens: estimateTokens(result.output),
-      iterations: attempts,
-      ...(failed ? { failReason: (artifact as Artifact<'failure'>).body.reason } : {}),
-    })
-
-    lastArtifact = artifact
-    if (!failed) {
-      return { nodeId: packet.t, workerId: worker.id, artifact, latencyMs: totalLatency, attempts }
-    }
-    if (!(artifact as Artifact<'failure'>).body.recoverable) {
-      break
-    }
-    warn(`dispatch: ${worker.id} failed (${(artifact as Artifact<'failure'>).body.reason}), escalating`)
   }
 
-  return {
-    nodeId: packet.t,
-    workerId: lastWorkerId,
-    artifact: lastArtifact ?? makeArtifact('failure', packet.t, 'kernel', {
-      reason: 'all ladder workers unavailable',
-      recoverable: false,
-    }),
-    latencyMs: totalLatency,
-    attempts,
-  }
+  info(`dispatch: ${packet.t} → ${worker.worker.id} (tier ${worker.worker.tier}, ${worker.justification})`)
+
+  const result = await harness.invoke({ prompt, timeoutMs: options.timeoutMs, maxOutputBytes: options.maxOutputBytes })
+  const artifact: Artifact = result.ok
+    ? parseWorkerOutput(result.output, packet, worker.worker.id)
+    : makeArtifact('failure', packet.t, worker.worker.id, { reason: result.failReason ?? 'harness failure', recoverable: true })
+
+  const failed = isKind(artifact, 'failure')
+  options.onMetric?.({
+    at: new Date().toISOString(),
+    taskId: packet.t,
+    workerId: worker.worker.id,
+    tier: worker.worker.tier,
+    act: packet.act,
+    ok: !failed,
+    latencyMs: result.latencyMs,
+    estInputTokens,
+    estOutputTokens: estimateTokens(result.output),
+    iterations: 1,
+    ...(failed ? { failReason: (artifact as Artifact<'failure'>).body.reason } : {}),
+  })
+
+  return { nodeId: packet.t, workerId: worker.worker.id, artifact, latencyMs: result.latencyMs, attempts: 1 }
 }
 
 // Execute a DAG: nodes whose dependencies are settled run concurrently up to
@@ -156,7 +121,7 @@ export async function dispatchWithLadder(
 // `options.onNodeComplete` fires per dispatched node for checkpointing.
 export async function executePlan(
   plan: DispatchPlan,
-  ladderFor: (node: DispatchNode) => ScoredWorker[],
+  workerFor: (node: DispatchNode) => ScoredWorker,
   options: DispatchOptions = DEFAULT_DISPATCH_OPTIONS,
 ): Promise<Map<string, NodeResult>> {
   const results = new Map<string, NodeResult>()
@@ -217,7 +182,7 @@ export async function executePlan(
         continue
       }
 
-      const task = dispatchWithLadder(node.packet, node.chunks, ladderFor(node), options)
+      const task = dispatchOne(node.packet, node.chunks, workerFor(node), options)
         .then(r => {
           const settled = { ...r, nodeId: id }
           results.set(id, settled)

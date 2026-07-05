@@ -79,8 +79,7 @@ test('policy: deny list and spend cap exclude workers', () => {
   const denied: Policy = { ...DEFAULT_POLICY, denyWorkers: ['expensive'] }
   assert.equal(checkPolicy(w, compileIntent('fix bug in src/a.ts'), denied).allowed, false)
 
-  const capped: Policy = { ...DEFAULT_POLICY, maxSpendPerDispatch: 0.01 }
-  const plan = planDispatch(compileIntent('fix bug in src/a.ts'), makeRegistry([w]), capped)
+  const plan = planDispatch(compileIntent('fix bug in src/a.ts'), makeRegistry([w]), DEFAULT_POLICY, undefined, undefined, undefined, 0.01)
   assert.equal(plan.ladder.length, 0)
   assert.ok(plan.excluded.some(e => e.reason.includes('spend')))
 })

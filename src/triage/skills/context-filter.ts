@@ -1,9 +1,9 @@
 // Context Filter (spec §4.6). Marks which context matters and which to ignore.
 // Defines BOUNDARIES only — it never fetches, reads, or expands context.
-import { type CTS_Skill } from '../skill.js'
+import { type TriageStage } from '../skill.js'
 import { GREETING, POLITENESS, FILLER, extractFileTokens, extractIdentifiers } from '../signals.js'
 
-export const contextFilterSkill: CTS_Skill = {
+export const contextFilterSkill: TriageStage = {
   name: 'context-filter',
   purpose: 'Mark required vs ignorable context boundaries (no fetching).',
   input_schema: { raw: 'string', normalized_task: 'string' },

@@ -12,7 +12,7 @@
 import { makeArtifact, isKind } from '../artifact/artifacts.js'
 import { type UCP, type PacketOut } from '../packet/ucp.js'
 import { type TaskIntent } from '../capability/capabilities.js'
-import { compilerRuntime } from '../compiler/runtime.js'
+import { compileIntent } from '../capability/intent-compiler.js'
 import { normalizeInput } from '../ingress/ingress.js'
 import { runTriage } from '../triage/pipeline.js'
 import { type CTSPacket } from '../triage/packet.js'
@@ -60,7 +60,7 @@ export const triageSkill: Skill = {
   },
   execute(ctx) {
     const cts = runTriage({ ucp: contextUcp(ctx), raw: ctx.raw || ctx.task })
-    const intent = compilerRuntime().intent(cts.normalized_task)
+    const intent = compileIntent(cts.normalized_task)
     const data: TriageData = {
       cts,
       intent,

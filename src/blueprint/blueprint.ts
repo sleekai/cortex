@@ -7,6 +7,7 @@
 // Producer→Evaluator→Router closed loop (loop/loop-engine.ts), which already
 // embodies retry / escalate / finish under policy bounds. Conditions gate
 // steps at runtime; a skill's own applicable() gates it further.
+import { namedRegistry } from '../core/registry.js'
 import { type Artifact } from '../artifact/artifacts.js'
 import { type PolicySet } from '../policy/policies.js'
 
@@ -32,21 +33,4 @@ export interface Blueprint {
 }
 
 // ── Registry (pluggability seam, MVP §12) ─────────────────────────────────
-const blueprints = new Map<string, Blueprint>()
-
-export function registerBlueprint(blueprint: Blueprint): void {
-  blueprints.set(blueprint.name, blueprint)
-}
-
-export function getBlueprint(name: string): Blueprint | undefined {
-  return blueprints.get(name)
-}
-
-export function registeredBlueprints(): Blueprint[] {
-  return [...blueprints.values()]
-}
-
-// Test/isolation hook.
-export function clearBlueprints(): void {
-  blueprints.clear()
-}
+export const { register: registerBlueprint, get: getBlueprint, all: registeredBlueprints, clear: clearBlueprints } = namedRegistry<Blueprint>()

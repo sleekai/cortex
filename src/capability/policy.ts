@@ -7,15 +7,12 @@ import { type TaskIntent } from './capabilities.js'
 export interface Policy {
   // Workers that must never be selected, by id.
   denyWorkers: string[]
-  // Spend ceiling per dispatch (relative cost units); Infinity = uncapped.
-  maxSpendPerDispatch: number
   // When true, only workers with writeAccess 'patch' may produce patches.
   enforceWriteAccess: boolean
 }
 
 export const DEFAULT_POLICY: Policy = {
   denyWorkers: [],
-  maxSpendPerDispatch: Number.POSITIVE_INFINITY,
   enforceWriteAccess: true,
 }
 

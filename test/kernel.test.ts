@@ -4,7 +4,7 @@ import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
 import '../src/harness/cli-harness.js'
-import { planTask, prepareDispatch, runTask } from '../src/kernel/kernel.js'
+import { planTask, prepareDispatch, runTask } from '../src/kernel/index.js'
 import { DEFAULT_BUDGET } from '../src/core/types.js'
 
 // The kernel resolves .cortex/ relative to the project root under test.
@@ -123,8 +123,8 @@ test('runTask: persists artifacts, state, and metrics for CLI and MCP alike', as
   assert.equal(outcome.kind, 'completed')
   if (outcome.kind !== 'completed') return
   // The echo worker replies IMPOSSIBLE — an unrecoverable failure artifact.
-  assert.equal(outcome.result.success, false)
-  assert.equal(outcome.result.iterations, 1)
+  assert.equal(outcome.result.accepted, false)
+  assert.equal(outcome.result.state.iteration, 1)
 
   // Persistence is the kernel's job, identical for every surface.
   const artifactDir = path.join(dir, '.cortex', 'artifacts', outcome.ucp.t)

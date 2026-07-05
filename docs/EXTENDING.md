@@ -23,7 +23,7 @@ side-effect import — ship a module that calls `register*` at load time.
 | Execution skill | `src/skill/registry.ts` | `registerSkill(skill)` |
 | Blueprint | `src/blueprint/blueprint.ts` | `registerBlueprint(bp)` |
 | Policy set | `src/policy/policies.ts` | `registerPolicySet(set)` |
-| Triage (CTS) stage | `src/triage/registry.ts` | `registerSkill(ctsSkill)` |
+| Triage (CTS) stage | `src/triage/registry.ts` | `registerSkill(stage)` (type `TriageStage`) |
 | Ingress adapter | `src/ingress/ingress.ts` | `registerAdapter(adapter)` |
 | Egress renderer | `src/egress/egress.ts` | `registerRenderer(kind, fn)` |
 | Worker | `.cortex/workers.json` overlay | JSON, no code |
@@ -79,9 +79,9 @@ Contract:
   `clarification` artifact. `'stop'` ends the blueprint unaccepted.
 - `data` is merged into the shared blackboard under the skill's name — the
   composition mechanism between skills.
-- CTS skills (`src/triage/skill.ts`) are a different, narrower contract: they
-  are *stages inside* the triage pipeline. The whole triage pipeline is one
-  execution Skill here.
+- CTS stages (`src/triage/skill.ts`: `TriageStage`) are a different, narrower
+  contract: they are *stages inside* the triage pipeline. The whole triage
+  pipeline is one execution Skill here.
 
 ## Blueprint API (`src/blueprint/blueprint.ts`)
 
@@ -147,8 +147,9 @@ registerPolicySet({
 
 Router bounds are a projection of the policy set (`boundsFromPolicies`) —
 the Router itself stays pure and policy-free. `capability/policy.ts` (worker
-deny-lists, write access, spend gates) is a separate, complementary layer:
-it defines the *feasible worker set*; these policies steer the *loop*.
+deny-lists, write access) is a separate, complementary layer: it defines the
+*feasible worker set*; spend gates live in `core/types.ts` `BudgetConfig` and
+the `PolicySet.budget` policy.
 
 ## Compiler Runtime (`src/compiler/runtime.ts`)
 
@@ -179,7 +180,8 @@ touching callers; it returns a restore function.
    (MVP §4); the Evaluator judges; the Router retries / escalates / finishes
    under policy bounds. Evaluations naming `missingContext` trigger the
    context provider — the context policy decides whether the fetch happens,
-   the Context Compiler decides what minimal context answers it.
+    the `ContextService` (`loop/context-service.ts`) decides — the context
+    policy gates the fetch, the Context Compiler finds minimal context.
 6. **Persistence + egress** — artifacts land in `.cortex/artifacts/<task>/`,
    state and metrics update, and the surface renders the outcome through the
    egress layer.

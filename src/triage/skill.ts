@@ -34,7 +34,7 @@ export interface SkillResult {
   notes?: string[]
 }
 
-export interface CTS_Skill {
+export interface TriageStage {
   name: string
   purpose: string
   // Descriptive JSON for registry introspection / pluggability. Documentation,

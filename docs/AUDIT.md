@@ -5,16 +5,13 @@ orchestration kernel: model-, harness-, protocol-agnostic; artifact-driven;
 cost/token-aware; observable; extensible). Referenced by `ARCHITECTURE.md`.
 
 Verdict up front: **the migration described in `ARCHITECTURE.md` is
-complete.** All ten phases of the canonical roadmap are implemented and
-tested (95 tests green past v2.1.0). The two gaps this audit originally
-flagged are closed: the kernel is extracted to `src/kernel/kernel.ts` (both
-entry points are thin surfaces over it), and the DAG executor has
-checkpointing, resume, and cooperative cancellation. Since then a state-graph
-layer (`src/graph/`) was added above dispatch: reducer channels, conditional
-routing, Send fan-out, bounded cycles, and interrupt/resume — LangGraph's
-proven control-flow ideas rebuilt dependency-free on the existing dispatch
-path. Several roadmap items remain deliberately deferred; the deferrals are
-documented here with their tradeoffs.
+complete.** All seven phases of the canonical roadmap are implemented and
+tested (190 tests green past v2.1.0). The two gaps this audit originally
+flagged are closed: the kernel is extracted to `src/kernel/` (both entry
+points are thin surfaces over it), and the DAG executor has checkpointing,
+resume, and cooperative cancellation. Several roadmap items remain
+deliberately deferred; the deferrals are documented here with their
+tradeoffs.
 
 ---
 
@@ -26,15 +23,13 @@ documented here with their tradeoffs.
                     └──────┬───────┘      └───────┬───────┘     over the kernel
                            └────────┬─────────────┘
                                     ▼
-        ┌───────────────────────────────────────────────────┐
-        │ kernel/kernel.ts (the one pipeline):               │
-        │  planTask: compileIntent → loadRegistry →          │
-        │   reliabilityOverrides → planDispatch              │
-        │  prepareDispatch: + compileContext →               │
-        │   generateWorkPacket → enforceBudget               │
-        │  runTask: + runValidationLoop →                    │
-        │   saveArtifact/updateState/appendMetric            │
-        └───────────────────────────────────────────────────┘
+        ┌──────────────────────────────────────────────────────┐
+        │ kernel/ (orchestrators):                              │
+        │  kernel.ts: planTask, prepareDispatch, runLocate     │
+        │  dispatch-orchestrator.ts: runTask, runLoop          │
+        │  blueprint-orchestrator.ts: runBlueprint             │
+        │  barrel: index.ts re-exports all                     │
+        └──────────────────────────────────────────────────────┘
              │            │            │            │
              ▼            ▼            ▼            ▼
         capability/   retrieval/    packet/      worker/ + harness/
@@ -54,16 +49,19 @@ documented here with their tradeoffs.
 Module dependency map (import direction, no cycles):
 
 ```
-core/ (types, tokens, logger)        ← everyone
-artifact/                            ← worker, validator, state, kernel-pipeline
-capability/ → worker/registry, packet/budget (spend), artifact
-worker/ → harness, packet/ucp, artifact, capability(planner types), state(metric type)
+core/ (types, tokens, logger, signals)   ← everyone
+artifact/                                ← worker, validator, state, kernel
+capability/ → worker/registry, packet/budget (spend), artifact, core/signals
+worker/ → harness, packet/ucp, artifact, capability, state(metric type)
 harness/ → (nothing internal; self-registering factories)
 retrieval/ → core, capability(intent type)
 packet/ → core, retrieval(chunk type via core)
 validator/ → worker/dispatch, packet/generator, artifact
 state/ → artifact
-index.ts / mcp-server.ts → all of the above (too much — see §3)
+loop/ → packet, worker, validator, core, artifact
+kernel/ (orchestrators) → capability, retrieval, packet, worker, harness,
+  loop, artifact, state, ingress, triage, skill, blueprint, policy
+index.ts / mcp-server.ts → kernel/ (barrel import)
 ```
 
 Execution flow (dispatch): intent (deterministic, zero model calls) → plan
@@ -76,22 +74,27 @@ error-only retry ≤3) → artifacts + state + metrics persisted.
 
 | Subsystem | State | Verdict |
 |---|---|---|
-| `core/` types, tokens, logger | single token estimator, shared primitives | **keep unchanged** |
+| `core/` types, tokens, logger, signals | shared primitives + signal tables (FILE_PATTERN, complexity classification) | **keep unchanged** |
 | `artifact/` typed union, parse-once boundary | 10 kinds, guards, (de)serialize | **keep unchanged** |
 | `packet/` UCP v2 + generator + budget | versioned, v1-compatible read, degrade cascade, spend refuse | **keep unchanged** |
 | `capability/` vocabulary, intent compiler, EU planner, policy | deterministic classifier w/ confidence; EU = q·rel·speed/spend; ladder + tier-0 short-circuit | **keep unchanged** |
 | `worker/registry` JSON specs + overlay | hot-swap via `.cortex/workers.json`, validation, env overrides, `disabled` retirement | **keep unchanged** |
-| `worker/dispatch` ladder + DAG executor | ladder walk solid; `executePlan` runs parallel w/ fan-in short-circuit, checkpoint/resume (`resumeFrom`, `onNodeComplete`), cooperative cancel | **keep** (was: refactor — completed) |
+| `worker/dispatch` ladder + DAG executor | ladder walk solid; `executePlan` runs parallel w/ fan-in short-circuit, checkpoint/resume (`resumeFrom`, `onNodeComplete`), cooperative cancel | **keep** |
 | `harness/` seam + cli/http | factory registry; planner never sees execution detail | **keep; extend by registration only** |
-| `graph/` state graph over dispatch | reducer channels, conditional edges, Send fan-out, bounded cycles, interrupt/resume, per-superstep checkpoints; `packetNode` reuses `dispatchWithLadder` | **keep; added post-audit** |
+| `core/signals.ts` shared signal tables | `FILE_PATTERN`, `OPEN_SIGNALS`, `TRIVIAL_SIGNALS`, `classifyComplexity` | **added** — deduplicated from intent-compiler + triage |
 | `retrieval/` AST, TF-IDF, git-recency, L0–L4 compiler | deterministic, budget-gated escalation | **keep; escalation trigger is narrow (see §4)** |
 | `validator/` patch-apply + loop | error-only retry packets (tested invariant) | **keep unchanged** |
 | `state/` store + metrics | `.cortex/` engine, legacy migration, JSONL learning loop → planner priors | **keep; add run checkpoints** |
-| `index.ts` | CLI surface over `kernel/kernel.ts` | **done** — pipeline extracted |
-| `mcp-server.ts` | MCP surface over the same kernel; persistence drift fixed | **done** — pipeline extracted |
+| `worker/output-parser.ts` + diff-extractor, json-extractor, artifact-builder | thin composition over three focused extractors | **split** — was a 119-line monolith |
+| `index.ts` | CLI surface over `kernel/` | **done** — pipeline extracted |
+| `mcp-server.ts` | MCP surface over the same kernel | **done** — pipeline extracted |
 | `dist/`, `dist-test/` | build artifacts on disk | gitignored, untracked — no action |
 
-Nothing qualifies for **remove** in source. Nothing is dead code.
+The graph module (`src/graph/`) was identified as orphaned infrastructure
+(~500 lines with zero production consumers) and removed. The triage cache
+(`src/triage/cache.ts`) was removed — CTS stages are deterministic regex
+pipelines where caching saved microseconds at the cost of a global mutable
+Map and fragile control flow.
 
 ## 3. Technical debt inventory (ranked)
 
@@ -100,9 +103,7 @@ Nothing qualifies for **remove** in source. Nothing is dead code.
    MCP dispatch now persists artifacts and state like the CLI.
 2. ~~**DAG executor incomplete.**~~ **Resolved** — `executePlan` has
    `resumeFrom` (replay/partial recomputation), `onNodeComplete`
-   (checkpointing), and `AbortSignal` cancellation. Multi-node plans remain
-   caller-constructed; the state graph (`src/graph/`) is the dynamic
-   frontend for runtime routing, loops, fan-out, and human gates.
+   (checkpointing), and `AbortSignal` cancellation.
 3. **Context escalation trigger is narrow.** Escalates only when a level
    yields zero chunks. A patch task with *weakly relevant* chunks never climbs.
    Acceptable v1 heuristic; needs a retrieval-quality metric before widening
@@ -124,7 +125,7 @@ Nothing qualifies for **remove** in source. Nothing is dead code.
 | 5 Capability system | capability-centric execution | **done** | `capability/*`; planner never sees raw text |
 | 6 Worker abstraction | registry, hot-swap, profiles | **done** | `worker/registry.ts` + JSON overlay + harness seam |
 | 7 Economic scheduler | utility optimization | **done** | `capability/planner.ts` EU scoring + spend gate + ladder |
-| 8 Execution graphs | DAG + retries + cancel + checkpoint + replay | **done** | `worker/dispatch.ts` executePlan (static DAG); `graph/` state graph adds dynamic routing, cycles, fan-out, interrupt/resume |
+| 8 Execution graphs | DAG + retries + cancel + checkpoint + replay | **done** | `worker/dispatch.ts` executePlan (static DAG) |
 | 9 Progressive escalation | expand only when justified | **partial** | budget-gated climb exists; trigger narrow (§3.3) → deferred pending retrieval-quality metric |
 | 10 Kernel activation | kernel owns planning/scheduling/budget/policy | **done** | `kernel/kernel.ts`: planTask / prepareDispatch / runTask; CLI and MCP are surfaces |
 
@@ -153,16 +154,10 @@ Directive items **deliberately deferred**, with tradeoffs (Rule 6):
 - **Daemon/scheduler-as-a-service.** Statelessness-by-construction is the
   repo's strongest property (ARCHITECTURE.md deviation 2). Unchanged.
 
-## 5. Migration plan (this iteration) — **shipped**
+## 5. Migration plan — **shipped**
 
-Both steps below are implemented and tested (see §2/§4). A third increment
-followed: the state graph (`src/graph/`) — reducer channels, conditional
-edges, Send fan-out, bounded cycles, interrupt/resume, per-superstep
-checkpoints — layered on `dispatchWithLadder` without touching existing
-callers. The plan is kept for the record.
-
-Both steps obey the rules: incremental, runnable after each commit, tested,
-old paths preserved.
+All phases below are implemented and tested (see §2/§4). The plan is kept for
+the record.
 
 **Step 1 — Kernel extraction (completes Phase 10).**
 - New `src/kernel/kernel.ts`: `planTask()` (intent+plan, read-only),

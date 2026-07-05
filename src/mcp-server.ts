@@ -7,18 +7,16 @@ import { z } from 'zod'
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { DEFAULT_BUDGET, type BudgetConfig } from './core/types.js'
-import { compileIntent } from './capability/intent-compiler.js'
 import { loadRegistry } from './worker/registry.js'
-import { compileContext } from './retrieval/context-compiler.js'
 import { buildPrompt } from './worker/prompt.js'
-import { planTask, prepareDispatch, runTask, runBlueprint, type BlueprintConfig } from './kernel/kernel.js'
+import { planTask, prepareDispatch, runTask, runBlueprint, runLocate, listWorkers, type BlueprintConfig } from './kernel/index.js'
 import { getPolicySet, DEFAULT_POLICIES } from './policy/policies.js'
 import { renderBlueprintSummary } from './egress/egress.js'
 import { initProject } from './state/store.js'
 import { readMetrics, aggregateStats } from './state/metrics.js'
-import { createHarness } from './harness/harness.js'
 import { normalizeInput as ingressNormalize } from './ingress/ingress.js'
 import { renderPlanSummary, renderPointerList } from './egress/egress.js'
+import { isKind } from './artifact/artifacts.js'
 // Triage Skill System (CTS) — opt-in per-call via the `triage` argument.
 import './triage/skills/builtins.js'
 import { runTriage } from './triage/pipeline.js'
@@ -84,9 +82,8 @@ server.registerTool('cortex_locate', {
   try {
     const projectRoot = resolveDir(args.dir)
     const ingressPacket = ingressNormalize({ content: args.task, kind: 'mcp', explicitGoal: args.goal, metadata: { projectRoot } })
-    const intent = { ...compileIntent(args.task), taskType: 'locate' as const }
-    const context = compileContext(projectRoot, ingressPacket.ucp.g, intent, DEFAULT_BUDGET)
-    const text = renderPointerList(context.pointers, { targetKind: 'mcp' })
+    const pointers = runLocate(args.task, projectRoot, ingressPacket.ucp.g)
+    const text = renderPointerList(pointers, { targetKind: 'mcp' })
     return { content: [{ type: 'text', text }] }
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : String(e)
@@ -101,19 +98,11 @@ server.registerTool('cortex_workers', {
 }, (args) => {
   try {
     const projectRoot = resolveDir(args.dir)
-    const registry = loadRegistry(projectRoot)
-    const stats = aggregateStats(readMetrics(projectRoot))
     const lines: string[] = []
-    for (const w of registry.workers) {
-      let availability = 'unknown'
-      try {
-        availability = createHarness(w.harness).available() ? 'available' : 'UNAVAILABLE'
-      } catch (e: unknown) {
-        availability = `error: ${e instanceof Error ? e.message : String(e)}`
-      }
-      const s = stats.get(w.id)
-      const observed = s ? `  success: ${(s.successRate * 100).toFixed(0)}% (${s.dispatches} dispatches)` : ''
-      lines.push(`${w.id}  tier=${w.tier}  caps=${w.capabilities.join(',')}  harness=${w.harness.kind}  ${availability}${observed}`)
+    for (const w of listWorkers(projectRoot)) {
+      const availability = w.availableError ?? (w.available ? 'available' : 'UNAVAILABLE')
+      const observed = w.dispatches ? `  success: ${((w.successRate ?? 0) * 100).toFixed(0)}% (${w.dispatches} dispatches)` : ''
+      lines.push(`${w.id}  tier=${w.tier}  caps=${w.capabilities.join(',')}  harness=${w.harnessKind}  ${availability}${observed}`)
     }
     return { content: [{ type: 'text', text: lines.join('\n') }] }
   } catch (e: unknown) {
@@ -206,21 +195,16 @@ server.registerTool('cortex_dispatch', {
     }
 
     const { result } = outcome
-    const verdict = result.success ? 'PASS' : 'FAIL'
+    const verdict = result.accepted ? 'PASS' : 'FAIL'
+    const patch = result.finalOutput && isKind(result.finalOutput, 'patch') ? result.finalOutput.body.diff : ''
+    const reasoning = result.finalOutput && isKind(result.finalOutput, 'patch') ? result.finalOutput.body.reasoning : ''
     const output: string[] = [
       `Result: ${verdict}`,
       `Task: ${outcome.ucp.t}`,
-      `Iterations: ${result.iterations}`,
-      `Patch: ${result.patch ? `${result.patch.length} chars` : 'none'}`,
-      `Reasoning: ${result.reasoning || 'none'}`,
-      `Validation: ${result.validation.passed ? 'passed' : 'FAILED'}`,
+      `Iterations: ${result.state.iteration}`,
+      `Patch: ${patch ? `${patch.length} chars` : 'none'}`,
+      `Reasoning: ${reasoning || 'none'}`,
     ]
-
-    if (result.validation.errors.length > 0) {
-      for (const e of result.validation.errors) {
-        output.push(`  Error: ${e}`)
-      }
-    }
 
     return { content: [{ type: 'text', text: output.join('\n') }] }
   } catch (e: unknown) {

@@ -9,6 +9,7 @@
 // defines the feasible set for worker selection; this one governs the
 // execution lifecycle around it. The two compose: the planner filters
 // workers, these policies steer the loop that dispatches them.
+import { namedRegistry } from '../core/registry.js'
 import { type RouterBounds, DEFAULT_BOUNDS } from '../loop/router.js'
 
 // How many times a worker may retry at the same tier before the loop stops.
@@ -118,32 +119,19 @@ export function mergePolicies(base: PolicySet, overrides?: Partial<Omit<PolicySe
 }
 
 // ── Named policy-set registry (pluggability seam) ─────────────────────────
-// Mirrors the kind-keyed Map + register*/get* pattern used by ingress
-// adapters, egress renderers, and triage skills.
-const policySets = new Map<string, PolicySet>()
+const { register, get, all, clear } = namedRegistry<PolicySet>()
 
-export function registerPolicySet(set: PolicySet): void {
-  policySets.set(set.name, set)
-}
+export { register as registerPolicySet, get as getPolicySet, all as registeredPolicySets }
 
-export function getPolicySet(name: string): PolicySet | undefined {
-  return policySets.get(name)
-}
-
-export function registeredPolicySets(): PolicySet[] {
-  return [...policySets.values()]
-}
-
-// Test/isolation hook.
+// Test/isolation hook — re-registers builtins after clear.
 export function clearPolicySets(): void {
-  policySets.clear()
+  clear()
   registerBuiltinPolicySets()
 }
 
 function registerBuiltinPolicySets(): void {
-  registerPolicySet(DEFAULT_POLICIES)
-  // Strict: fail fast, never interrupt the human, no context expansion.
-  registerPolicySet({
+  register(DEFAULT_POLICIES)
+  register({
     name: 'strict',
     retry: { name: 'strict-retry', maxIterations: 2 },
     escalation: { name: 'strict-escalation', maxDepth: 1 },
@@ -152,8 +140,7 @@ function registerBuiltinPolicySets(): void {
     budget: { name: 'strict-budget', maxCost: Number.POSITIVE_INFINITY, maxInputTokens: 1500 },
     timeout: { name: 'strict-timeout', workerTimeoutMs: 60_000 },
   })
-  // Generous: let the loop work — more retries, full ladder, eager context.
-  registerPolicySet({
+  register({
     name: 'generous',
     retry: { name: 'generous-retry', maxIterations: 8 },
     escalation: { name: 'generous-escalation', maxDepth: 3 },

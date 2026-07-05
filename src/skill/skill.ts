@@ -5,7 +5,7 @@
 // composable — Blueprints (blueprint/) name them; the runner threads a shared
 // blackboard through them so downstream skills see upstream output.
 //
-// Relationship to CTS skills (triage/skill.ts): a CTS_Skill is a *stage* of
+// Relationship to CTS skills (triage/skill.ts): a TriageStage is a *stage* of
 // the deterministic triage pipeline and patches one slice of a CTSPacket.
 // This Skill is one level up — the whole triage pipeline is itself one Skill
 // here (skill/builtins.ts `triage`). Both stay: CTS composes cognition inside

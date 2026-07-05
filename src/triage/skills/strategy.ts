@@ -1,7 +1,7 @@
 // Strategy Sketching (spec §4.4). Emits up to 3 lightweight approach sketches
 // — a name, a one-line description, a cost tier, and a risk level. These are
 // hints, NOT plans: no steps, no file lists, no solution content.
-import { type CTS_Skill } from '../skill.js'
+import { type TriageStage } from '../skill.js'
 import { type CtsStrategy } from '../packet.js'
 import { MAX_STRATEGIES } from '../packet.js'
 import { complexityOf, extractFileTokens, LOCATE_VERBS, PATCH_VERBS } from '../signals.js'
@@ -25,7 +25,7 @@ const LLM_HEAVY: CtsStrategy = {
   risk: 'high',
 }
 
-export const strategySkill: CTS_Skill = {
+export const strategySkill: TriageStage = {
   name: 'strategy',
   purpose: 'Sketch up to 3 lightweight approach candidates with cost/risk.',
   input_schema: { normalized_task: 'string', subtasks: 'CtsSubtask[]', ambiguity: 'CtsAmbiguity' },

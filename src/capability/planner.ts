@@ -74,6 +74,8 @@ export function planDispatch(
   policy: Policy = DEFAULT_POLICY,
   reliabilityOverrides: ReliabilityOverrides = new Map(),
   retryProbability = 0.25,
+  tierHint?: string,
+  maxSpend = Number.POSITIVE_INFINITY,
 ): Plan {
   if (intent.taskType === 'locate') {
     return { tier0: true, entryTier: 1, ladder: [], excluded: [] }
@@ -85,6 +87,14 @@ export function planDispatch(
   }
   if (intent.estReasoningDepth >= 3) {
     entryTier = 3
+  }
+
+  // Triage routing hint overrides the entry tier when present — it has richer
+  // signal analysis (file count, ambiguity, verb patterns) than the intent
+  // compiler's complexity heuristic.
+  if (tierHint) {
+    const mapped: Record<string, WorkerTier> = { T0: 1, T1: 1, T2: 2, T3: 3, T4: 3 }
+    entryTier = mapped[tierHint] ?? entryTier
   }
 
   const excluded: { workerId: string; reason: string }[] = []
@@ -110,8 +120,8 @@ export function planDispatch(
 
   // Spend gate is policy, not preference: over-cap workers drop out entirely.
   const affordable = scored.filter(s => {
-    if (s.expectedSpend > policy.maxSpendPerDispatch) {
-      excluded.push({ workerId: s.worker.id, reason: `spend ${s.expectedSpend.toFixed(2)} over cap ${policy.maxSpendPerDispatch}` })
+    if (s.expectedSpend > maxSpend) {
+      excluded.push({ workerId: s.worker.id, reason: `spend ${s.expectedSpend.toFixed(2)} over cap ${maxSpend}` })
       return false
     }
     return true

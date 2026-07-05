@@ -1,7 +1,7 @@
 // The CTS pipeline (spec §5). Runs the registered skills in the fixed stage
 // order, threading a draft CTSPacket through each, then validates and returns
-// it. Deterministic and cheap: the whole packet is cached by the normalized
-// task's hash so repeated tasks skip the skill run entirely (spec §9).
+// it. Deterministic and cheap: every built-in skill is deterministic, so
+// repeated identical tasks always produce the same packet.
 //
 // Pluggability (spec §13): stage order is a declared list of skill names, not
 // hard-wired calls. Skills registered under an unknown name still run — after
@@ -11,7 +11,6 @@ import { type IngressPacket } from '../ingress/ingress.js'
 import { type CTSPacket, emptyPacket, validateCtsPacket } from './packet.js'
 import { type TriageContext, type TriagePolicy, DEFAULT_TRIAGE_POLICY } from './skill.js'
 import { enabledSkills } from './registry.js'
-import { cacheKey, getCached, setCached } from './cache.js'
 
 // Canonical stage order (spec §5). Skills not in this list run afterward.
 export const STAGE_ORDER = ['normalize', 'decompose', 'ambiguity', 'strategy', 'routing', 'context-filter'] as const
@@ -40,18 +39,9 @@ export function runTriage(input: TriageInput | IngressPacket, policy: TriagePoli
   const ctx: TriageContext = { ucp: input.ucp, raw, draft: emptyPacket(), policy }
   const skills = orderedSkills(policy)
 
-  let cacheChecked = false
   for (const skill of skills) {
     const { patch } = skill.execute(ctx)
     ctx.draft = { ...ctx.draft, ...patch }
-
-    // Once the task is normalized, a cache hit short-circuits the rest of the
-    // pipeline (deterministic skills → identical result for identical input).
-    if (!cacheChecked && skill.name === 'normalize') {
-      cacheChecked = true
-      const hit = getCached(cacheKey(ctx.draft.normalized_task))
-      if (hit) return hit
-    }
   }
 
   // Fall back to raw if the normalize stage was disabled.
@@ -62,6 +52,5 @@ export function runTriage(input: TriageInput | IngressPacket, policy: TriagePoli
     throw new Error(`CTS produced an invalid packet: ${validation.errors.join('; ')}`)
   }
 
-  setCached(cacheKey(ctx.draft.normalized_task), ctx.draft)
   return ctx.draft
 }

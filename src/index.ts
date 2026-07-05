@@ -11,11 +11,9 @@ import './harness/http-harness.js'
 
 import { DEFAULT_BUDGET, type BudgetConfig } from './core/types.js'
 import { info, error as logError } from './core/logger.js'
-import { compileIntent } from './capability/intent-compiler.js'
 import { loadRegistry } from './worker/registry.js'
-import { compileContext } from './retrieval/context-compiler.js'
 import { buildPrompt } from './worker/prompt.js'
-import { planTask, prepareDispatch, runTask, runLoop, runBlueprint, type LoopConfig, type BlueprintConfig } from './kernel/kernel.js'
+import { planTask, prepareDispatch, runTask, runLoop, runBlueprint, runLocate, listWorkers, type LoopConfig, type BlueprintConfig } from './kernel/index.js'
 import { registeredBlueprints } from './blueprint/blueprint.js'
 import { registeredSkills } from './skill/registry.js'
 import { getPolicySet, DEFAULT_POLICIES } from './policy/policies.js'
@@ -24,7 +22,6 @@ import { DEFAULT_BOUNDS, type RouterBounds } from './loop/router.js'
 import { isKind } from './artifact/artifacts.js'
 import { initProject } from './state/store.js'
 import { readMetrics, aggregateStats } from './state/metrics.js'
-import { createHarness } from './harness/harness.js'
 import { TEMPLATES, type TemplateKind, openAiTemplate, anthropicTemplate, chatGptTemplate, ollamaTemplate, cliTemplate, httpTemplate, opencodeAdapter, claudeCliAdapter } from './worker/templates.js'
 import { type WorkerSpec } from './worker/registry.js'
 import { normalizeInput as ingressNormalize } from './ingress/ingress.js'
@@ -253,20 +250,24 @@ async function commandRun(args: CliArgs): Promise<void> {
     logError(`budget refused dispatch: ${outcome.reason}`)
     process.exit(1)
   }
+
+  const { result } = outcome
+  const patch = result.finalOutput && isKind(result.finalOutput, 'patch') ? result.finalOutput.body.diff : ''
+  const reasoning = result.finalOutput && isKind(result.finalOutput, 'patch') ? result.finalOutput.body.reasoning : ''
   const summary = {
     kind: outcome.kind,
     taskId: outcome.ucp.t,
     goal: outcome.ucp.g,
-    success: outcome.result.success,
-    iterations: outcome.result.iterations,
-    patchLength: outcome.result.patch.length,
-    reasoning: outcome.result.reasoning || 'none',
-    validationPassed: outcome.result.validation.passed,
-    validationErrors: outcome.result.validation.errors,
+    success: result.accepted,
+    iterations: result.state.iteration,
+    patchLength: patch.length,
+    reasoning: reasoning || 'none',
+    validationPassed: result.accepted,
+    validationErrors: [] as string[],
   }
   const egressOut = renderDispatchSummary(summary, { targetKind: 'cli' })
   process.stdout.write(egressOut)
-  if (!outcome.result.success) {
+  if (!result.accepted) {
     process.exit(1)
   }
 }
@@ -434,26 +435,17 @@ function commandPlan(args: CliArgs): void {
 function commandLocate(args: CliArgs): void {
   const projectRoot = args.dir ?? process.cwd()
   const ingressPacket = ingressNormalize({ content: args.task, kind: 'cli', explicitGoal: args.goal })
-  const intent = { ...compileIntent(args.task), taskType: 'locate' as const }
-  const context = compileContext(projectRoot, ingressPacket.ucp.g, intent, DEFAULT_BUDGET)
-  process.stdout.write(renderPointerList(context.pointers, { targetKind: 'cli' }) + '\n')
+  const pointers = runLocate(args.task, projectRoot, ingressPacket.ucp.g)
+  process.stdout.write(renderPointerList(pointers, { targetKind: 'cli' }) + '\n')
 }
 
 function commandWorkers(args: CliArgs): void {
   const projectRoot = args.dir ?? process.cwd()
-  const registry = loadRegistry(projectRoot)
-  const stats = aggregateStats(readMetrics(projectRoot))
-  for (const w of registry.workers) {
-    let availability = 'unknown'
-    try {
-      availability = createHarness(w.harness).available() ? 'available' : 'UNAVAILABLE'
-    } catch (e: unknown) {
-      availability = `error: ${e instanceof Error ? e.message : String(e)}`
-    }
-    const s = stats.get(w.id)
-    const observed = s ? ` observed: ${(s.successRate * 100).toFixed(0)}% over ${s.dispatches} dispatches` : ''
+  for (const w of listWorkers(projectRoot)) {
+    const availability = w.availableError ?? (w.available ? 'available' : 'UNAVAILABLE')
+    const observed = w.dispatches ? ` observed: ${((w.successRate ?? 0) * 100).toFixed(0)}% over ${w.dispatches} dispatches` : ''
     process.stdout.write(
-      `${w.id}  tier=${w.tier}  caps=${w.capabilities.join(',')}  harness=${w.harness.kind}  ${availability}${observed}\n`,
+      `${w.id}  tier=${w.tier}  caps=${w.capabilities.join(',')}  harness=${w.harnessKind}  ${availability}${observed}\n`,
     )
   }
 }

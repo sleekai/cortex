@@ -2,12 +2,12 @@
 // subtasks with dependency edges and required/optional tags. Deterministic —
 // this is shallow structuring, NOT planning: no solutions, no steps invented
 // that the request didn't state.
-import { type CTS_Skill } from '../skill.js'
+import { type TriageStage } from '../skill.js'
 import { type CtsSubtask } from '../packet.js'
 import { MAX_SUBTASKS } from '../packet.js'
 import { splitClauses, isOptionalClause, isSequentialClause } from '../signals.js'
 
-export const decomposeSkill: CTS_Skill = {
+export const decomposeSkill: TriageStage = {
   name: 'decompose',
   purpose: 'Break the task into ordered subtasks with dependencies and optionality.',
   input_schema: { normalized_task: 'string' },
