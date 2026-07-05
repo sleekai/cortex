@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import * as assert from 'node:assert/strict'
-import { makeArtifact, isArtifact, isKind, serializeArtifact, parseArtifact } from '../src/artifact/artifacts.js'
+import { makeArtifact, isArtifact, isKind } from '../src/artifact/artifacts.js'
 
 test('makeArtifact produces a well-formed artifact', () => {
   const a = makeArtifact('patch', 't123', 'claude-cli', { diff: '--- a/x\n+++ b/x', reasoning: 'small fix' })
@@ -9,12 +9,6 @@ test('makeArtifact produces a well-formed artifact', () => {
   assert.equal(a.producedBy, 'claude-cli')
   assert.ok(a.id.startsWith('patch-'))
   assert.ok(isArtifact(a))
-})
-
-test('serialize/parse round-trips', () => {
-  const a = makeArtifact('decision', 't1', 'oracle', { question: 'q?', decision: 'yes', why: 'because' })
-  const parsed = parseArtifact(serializeArtifact(a))
-  assert.deepEqual(parsed, a)
 })
 
 test('isKind narrows the union', () => {
@@ -26,8 +20,8 @@ test('isKind narrows the union', () => {
   }
 })
 
-test('parseArtifact rejects malformed input', () => {
-  assert.equal(parseArtifact('not json'), null)
-  assert.equal(parseArtifact('{"id":"x"}'), null)
-  assert.equal(parseArtifact('42'), null)
+test('isArtifact rejects malformed input', () => {
+  assert.equal(isArtifact(null), false)
+  assert.equal(isArtifact({ id: 'x' }), false)
+  assert.equal(isArtifact(42), false)
 })

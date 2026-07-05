@@ -80,16 +80,3 @@ export function isArtifact(value: unknown): value is Artifact {
 export function isKind<K extends ArtifactKind>(artifact: Artifact, kind: K): artifact is Artifact<K> {
   return artifact.kind === kind
 }
-
-export function serializeArtifact(artifact: Artifact): string {
-  return JSON.stringify(artifact, null, 2)
-}
-
-export function parseArtifact(raw: string): Artifact | null {
-  try {
-    const parsed: unknown = JSON.parse(raw)
-    return isArtifact(parsed) ? parsed : null
-  } catch {
-    return null
-  }
-}

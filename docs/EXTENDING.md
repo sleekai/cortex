@@ -24,12 +24,15 @@ side-effect import — ship a module that calls `register*` at load time.
 | Blueprint | `src/blueprint/blueprint.ts` | `registerBlueprint(bp)` |
 | Policy set | `src/policy/policies.ts` | `registerPolicySet(set)` |
 | Triage (CTS) stage | `src/triage/registry.ts` | `registerSkill(stage)` (type `TriageStage`) |
-| Ingress adapter | `src/ingress/ingress.ts` | `registerAdapter(adapter)` |
-| Egress renderer | `src/egress/egress.ts` | `registerRenderer(kind, fn)` |
 | Worker | `.cortex/workers.json` overlay | JSON, no code |
 | Harness | `src/harness/harness.ts` | `registerHarnessFactory(kind, fn)` |
 | Evaluator | `loop/loop-engine.ts` options | `{ evaluator }` per run |
-| Compiler service | `src/compiler/runtime.ts` | `setCompilerRuntime(partial)` |
+| Context service | `src/loop/context-service.ts` | `{ contextService }` per run |
+
+Ingress/egress adapter registries are deliberately deferred until a second
+real ingress source or egress target exists — see
+`docs/adr/0002-defer-adapter-registries.md`. The seams are `normalizeInput`
+(ingress) and the summary renderers in `src/egress/egress.ts` (egress).
 
 ## Skill API (`src/skill/skill.ts`)
 

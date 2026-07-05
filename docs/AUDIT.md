@@ -8,10 +8,12 @@ Verdict up front: **the migration described in `ARCHITECTURE.md` is
 complete.** All seven phases of the canonical roadmap are implemented and
 tested (190 tests green past v2.1.0). The two gaps this audit originally
 flagged are closed: the kernel is extracted to `src/kernel/` (both entry
-points are thin surfaces over it), and the DAG executor has checkpointing,
-resume, and cooperative cancellation. Several roadmap items remain
-deliberately deferred; the deferrals are documented here with their
-tradeoffs.
+points are thin surfaces over it). Several roadmap items remain deliberately
+deferred; the deferrals are documented here with their tradeoffs. DAG
+execution and the ingress/egress adapter registries were later removed as
+zero-consumer speculation — see `docs/adr/0001-defer-dag-execution.md` and
+`docs/adr/0002-defer-adapter-registries.md`; historical references to them
+below are kept for the record.
 
 ---
 
@@ -79,12 +81,12 @@ error-only retry ≤3) → artifacts + state + metrics persisted.
 | `packet/` UCP v2 + generator + budget | versioned, v1-compatible read, degrade cascade, spend refuse | **keep unchanged** |
 | `capability/` vocabulary, intent compiler, EU planner, policy | deterministic classifier w/ confidence; EU = q·rel·speed/spend; ladder + tier-0 short-circuit | **keep unchanged** |
 | `worker/registry` JSON specs + overlay | hot-swap via `.cortex/workers.json`, validation, env overrides, `disabled` retirement | **keep unchanged** |
-| `worker/dispatch` ladder + DAG executor | ladder walk solid; `executePlan` runs parallel w/ fan-in short-circuit, checkpoint/resume (`resumeFrom`, `onNodeComplete`), cooperative cancel | **keep** |
+| `worker/dispatch` single-packet dispatch | `dispatchOne` parse-once at harness boundary; DAG executor removed (zero production consumers — ADR-0001) | **keep** |
 | `harness/` seam + cli/http | factory registry; planner never sees execution detail | **keep; extend by registration only** |
 | `core/signals.ts` shared signal tables | `FILE_PATTERN`, `OPEN_SIGNALS`, `TRIVIAL_SIGNALS`, `classifyComplexity` | **added** — deduplicated from intent-compiler + triage |
 | `retrieval/` AST, TF-IDF, git-recency, L0–L4 compiler | deterministic, budget-gated escalation | **keep; escalation trigger is narrow (see §4)** |
 | `validator/` patch-apply + loop | error-only retry packets (tested invariant) | **keep unchanged** |
-| `state/` store + metrics | `.cortex/` engine, legacy migration, JSONL learning loop → planner priors | **keep; add run checkpoints** |
+| `state/` store + metrics | `.cortex/` engine, legacy migration, JSONL learning loop → planner priors | **keep** |
 | `worker/output-parser.ts` + diff-extractor, json-extractor, artifact-builder | thin composition over three focused extractors | **split** — was a 119-line monolith |
 | `index.ts` | CLI surface over `kernel/` | **done** — pipeline extracted |
 | `mcp-server.ts` | MCP surface over the same kernel | **done** — pipeline extracted |
@@ -125,7 +127,7 @@ Map and fragile control flow.
 | 5 Capability system | capability-centric execution | **done** | `capability/*`; planner never sees raw text |
 | 6 Worker abstraction | registry, hot-swap, profiles | **done** | `worker/registry.ts` + JSON overlay + harness seam |
 | 7 Economic scheduler | utility optimization | **done** | `capability/planner.ts` EU scoring + spend gate + ladder |
-| 8 Execution graphs | DAG + retries + cancel + checkpoint + replay | **done** | `worker/dispatch.ts` executePlan (static DAG) |
+| 8 Execution graphs | DAG + retries + cancel + checkpoint + replay | **removed** | zero production consumers; deferred until a fan-out consumer exists (ADR-0001) |
 | 9 Progressive escalation | expand only when justified | **partial** | budget-gated climb exists; trigger narrow (§3.3) → deferred pending retrieval-quality metric |
 | 10 Kernel activation | kernel owns planning/scheduling/budget/policy | **done** | `kernel/kernel.ts`: planTask / prepareDispatch / runTask; CLI and MCP are surfaces |
 

@@ -14,8 +14,7 @@ Status (2026-07): phases 1–7 below are implemented and tested — the
 original 5-phase plan plus the CUEA closed-loop execution engine and the MVP
 execution model (skills, blueprints, policy sets). The kernel is extracted
 (`src/kernel/`: `kernel.ts`, `dispatch-orchestrator.ts`,
-`blueprint-orchestrator.ts`); the DAG executor supports checkpointing,
-resume, and cooperative cancellation. The CUEA loop (`src/loop/`) wraps the
+`blueprint-orchestrator.ts`). The CUEA loop (`src/loop/`) wraps the
 Producer→Evaluator→Router cycle around the same prepared dispatch pipeline,
 handing every continuation decision to the Router under explicit bounds (see
 "CUEA execution loop" below). `docs/AUDIT.md` §4 records what is deliberately
@@ -265,18 +264,13 @@ packet is compressed, split (fan-out via dispatch planner), or refused with a
 
 ### Dispatch planner (`worker/dispatch.ts`)
 
-Executes a `DispatchPlan` of nodes `{ packet, workerId, dependsOn[] }`:
-independent nodes run in parallel (`Promise.all` over async harness calls,
-bounded concurrency), dependents sequence, failures trigger per-node retry
-policy (error-only retry packet, unchanged semantics) then ladder escalation.
+Single-packet dispatch (`dispatchOne`): build prompt, invoke harness, parse
+output once at the harness boundary into a typed artifact, emit a metric
+record. Escalation and retry are the CUEA loop's responsibility.
 
-Checkpointing and replay: `executePlan` accepts `resumeFrom` (settled nodes
-are restored without re-dispatch — partial recomputation), `onNodeComplete`
-(fires per dispatched node; wire it to `saveRunCheckpoint`), and an
-`AbortSignal` for cooperative cancellation — nothing launches after abort,
-in-flight harness calls drain, and cancelled nodes settle as *recoverable*
-failures so a resume re-runs them. True mid-call abort would need harness
-support and is deferred until a harness can honor it.
+DAG execution (parallel nodes, checkpoint/resume, cooperative cancellation)
+is deliberately deferred until a real fan-out consumer exists — see
+`docs/adr/0001-defer-dag-execution.md`.
 
 ### CUEA execution loop (`loop/`)
 
@@ -357,9 +351,6 @@ Kernel entry: `runTask` / `runLoop` (`kernel/dispatch-orchestrator.ts`) and
 - `artifacts/<taskId>/*.json` — persisted decisions, reviews, plans.
 - `metrics.jsonl` — one record per dispatch: worker, tier, tokens in/out (est),
   latency, iterations, ok/fail, context level. Append-only.
-- `runs/<runId>.json` — execution-graph checkpoints: the non-failure node
-  results of a run (failures and cancellations are never persisted — they
-  must re-run on resume).
 - `workers.json` — optional project-local worker registry overlay.
 
 `metrics.ts` aggregates per-worker success rate / mean latency / mean tokens

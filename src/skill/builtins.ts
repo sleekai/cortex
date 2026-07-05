@@ -11,6 +11,7 @@
 // review use the injected SkillDispatch seam and are inapplicable without it.
 import { makeArtifact, isKind } from '../artifact/artifacts.js'
 import { type UCP, type PacketOut } from '../packet/ucp.js'
+import { generateJudgmentPacket } from '../packet/generator.js'
 import { type TaskIntent } from '../capability/capabilities.js'
 import { compileIntent } from '../capability/intent-compiler.js'
 import { normalizeInput } from '../ingress/ingress.js'
@@ -123,8 +124,7 @@ export const grillingSkill: Skill = {
 // task and hand it to the injected dispatch seam. The output parser turns the
 // reply into a decision/review artifact at the harness boundary as always.
 function judgmentPacket(ctx: SkillContext, act: 'ask' | 'review', question: string, out: PacketOut): UCP {
-  const base = contextUcp(ctx)
-  return { ...base, act, q: question, r: { out, format: 'json' } }
+  return generateJudgmentPacket(contextUcp(ctx), act, question, out)
 }
 
 export const summarizeSkill: Skill = {

@@ -1,7 +1,6 @@
 import { test } from 'node:test'
 import * as assert from 'node:assert/strict'
-import { normalizeInput, registerAdapter, getAdapter, registeredAdapters, type RawInput, type HarnessAdapter } from '../src/ingress/ingress.js'
-import { type Artifact } from '../src/artifact/artifacts.js'
+import { normalizeInput, type RawInput } from '../src/ingress/ingress.js'
 
 test('normalizeInput: wraps content in a UCP packet with source metadata', () => {
   const packet = normalizeInput({ content: 'fix the null check in auth.ts', kind: 'cli' })
@@ -49,35 +48,6 @@ test('normalizeInput: uses provided taskId', () => {
 test('normalizeInput: carries metadata', () => {
   const packet = normalizeInput({ content: 'fix bug', kind: 'ide', metadata: { project: 'cortex', workspace: 'sleekai' } })
   assert.equal(packet.metadata.project, 'cortex')
-})
-
-test('registerAdapter / getAdapter round-trips', () => {
-  const adapter: HarnessAdapter = {
-    kind: 'opencode',
-    description: 'OpenCode harness adapter',
-    normalize(raw) {
-      return normalizeInput(raw)
-    },
-    renderOutput(_artifact: Artifact) {
-      return 'opencode output'
-    },
-    renderBundle(_artifacts: Artifact[]) {
-      return 'opencode bundle'
-    },
-    supportedFormats() {
-      return [{ kind: 'markdown', mimeType: 'text/markdown' }]
-    },
-  }
-  registerAdapter(adapter)
-  const retrieved = getAdapter('opencode')
-  assert.ok(retrieved)
-  assert.equal(retrieved!.kind, 'opencode')
-  assert.equal(retrieved!.description, 'OpenCode harness adapter')
-})
-
-test('registeredAdapters includes built-in + custom', () => {
-  const kinds = registeredAdapters().map(a => a.kind)
-  assert.ok(kinds.includes('opencode'))
 })
 
 test('normalizeInput: different harness kinds produce correct metadata', () => {
