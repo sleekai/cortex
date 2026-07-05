@@ -5,7 +5,7 @@
 import * as fs from 'node:fs'
 import * as path from 'node:path'
 import { type Artifact } from '../artifact/artifacts.js'
-import { info, debug } from '../core/logger.js'
+import { info, debug, warn } from '../core/logger.js'
 
 const STATE_DIR = '.cortex'
 const LEGACY_DIR = '.ucp-toolchain'
@@ -44,7 +44,12 @@ function readJson(file: string): Record<string, unknown> | null {
   try {
     const parsed: unknown = JSON.parse(fs.readFileSync(file, 'utf-8'))
     return typeof parsed === 'object' && parsed !== null ? parsed as Record<string, unknown>: null
-  } catch {
+  } catch (e: unknown) {
+    // A missing file is the normal first-run case; anything else is silent
+    // state corruption worth surfacing.
+    if ((e as NodeJS.ErrnoException).code !== 'ENOENT') {
+      warn(`state: unreadable or malformed JSON at ${file} — treating as absent`)
+    }
     return null
   }
 }

@@ -22,6 +22,7 @@ function parseWithTypeScript(filePath: string): ts.SourceFile | null {
     const content = fs.readFileSync(filePath, 'utf-8')
     return ts.createSourceFile(filePath, content, ts.ScriptTarget.Latest, true)
   } catch {
+    debug(`ast: cannot read ${filePath} — excluded from retrieval`)
     return null
   }
 }

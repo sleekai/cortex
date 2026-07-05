@@ -10,7 +10,7 @@ import './harness/cli-harness.js'
 import './harness/http-harness.js'
 
 import { DEFAULT_BUDGET, type BudgetConfig } from './core/types.js'
-import { info, error as logError } from './core/logger.js'
+import { info, warn, error as logError } from './core/logger.js'
 import { loadRegistry } from './worker/registry.js'
 import { buildPrompt } from './worker/prompt.js'
 import { planTask, prepareDispatch, executeTask, runBlueprint, runLocate, listWorkers, triagedTask, type ExecuteConfig, type BlueprintConfig } from './kernel/index.js'
@@ -564,8 +564,12 @@ async function writeWorkerSpec(spec: WorkerSpec, projectRoot: string): Promise<v
   try {
     const raw = fs.readFileSync(filePath, 'utf-8')
     existing = JSON.parse(raw)
-  } catch {
-    // file doesn't exist yet — start fresh
+  } catch (e: unknown) {
+    // A missing file starts fresh; a malformed one is about to be
+    // overwritten — say so instead of silently discarding it.
+    if ((e as NodeJS.ErrnoException).code !== 'ENOENT') {
+      warn(`workers.json at ${filePath} is unreadable or malformed — rewriting it`)
+    }
   }
   if (!Array.isArray(existing.workers)) existing.workers = []
 
