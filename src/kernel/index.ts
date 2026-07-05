@@ -4,8 +4,8 @@ export {
 } from './kernel.js'
 
 export {
-  runTask, runLoop, executePrepared, triagedTask,
-  type TaskOutcome, type LoopConfig, type LoopOutcome
+  executeTask, runTask, runLoop, executePrepared, triagedTask,
+  type ExecuteConfig, type TaskOutcome, type LoopConfig, type LoopOutcome
 } from './dispatch-orchestrator.js'
 
 export {

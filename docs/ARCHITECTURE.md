@@ -49,7 +49,7 @@ cortex   (package: @sleekai/cortex)
   src/
     kernel/
       kernel.ts               planTask, prepareDispatch, runLocate, listWorkers
-      dispatch-orchestrator.ts  runTask, runLoop, executePrepared
+      dispatch-orchestrator.ts  executeTask, executePrepared, triagedTask
       blueprint-orchestrator.ts runBlueprint
       index.ts                barrel — re-exports from all kernel submodules
     core/
@@ -336,10 +336,12 @@ interface RouterBounds {
   loop engine accepts a service instance instead of a raw callback, so tests
   inject a mock without touching the kernel.
 
-Kernel entry: `runTask` / `runLoop` (`kernel/dispatch-orchestrator.ts`) and
-`runBlueprint` (`kernel/blueprint-orchestrator.ts`) — all share the same
-`prepareDispatch` pipeline, budget, and persistence path; the Router drives
-`runLoop` instead of the fixed validation loop. The barrel module
+Kernel entry: `executeTask` (`kernel/dispatch-orchestrator.ts`) and
+`runBlueprint` (`kernel/blueprint-orchestrator.ts`) — both share the same
+`prepareDispatch` pipeline, budget, persistence path, and context-on-demand
+service; the Router drives every continuation decision. `cortex dispatch`
+and `cortex loop` are the same `executeTask` call with different bounds
+(`runTask`/`runLoop` remain as deprecated aliases). The barrel module
 `kernel/index.ts` re-exports everything so callers import from one place.
 
 ### State engine & learning (`state/`)
@@ -381,7 +383,7 @@ same fields it already documents, now typed and validated by the kernel.
    rewire, tests green, SKILL.md + README updates, migration notes.
 
 6. **Closed-loop execution** — CUEA loop: execution state, evaluator, router,
-   loop engine + ladderProducer; `runLoop` kernel entry; router-bound
+   loop engine + ladderProducer; `executeTask` kernel entry; router-bound
    termination (maxIterations, maxEscalationDepth, maxCost, convergence
    heuristics); deterministic under identical inputs by construction;
    `test/router.test.ts` (12 unit tests), `test/loop-engine.test.ts`

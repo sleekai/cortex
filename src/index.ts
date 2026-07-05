@@ -13,7 +13,7 @@ import { DEFAULT_BUDGET, type BudgetConfig } from './core/types.js'
 import { info, error as logError } from './core/logger.js'
 import { loadRegistry } from './worker/registry.js'
 import { buildPrompt } from './worker/prompt.js'
-import { planTask, prepareDispatch, runTask, runLoop, runBlueprint, runLocate, listWorkers, triagedTask, type LoopConfig, type BlueprintConfig } from './kernel/index.js'
+import { planTask, prepareDispatch, executeTask, runBlueprint, runLocate, listWorkers, triagedTask, type ExecuteConfig, type BlueprintConfig } from './kernel/index.js'
 import { registeredBlueprints } from './blueprint/blueprint.js'
 import { registeredSkills } from './skill/registry.js'
 import { getPolicySet, DEFAULT_POLICIES } from './policy/policies.js'
@@ -231,7 +231,7 @@ async function commandRun(args: CliArgs): Promise<void> {
     return
   }
 
-  const outcome = await runTask(args.task, config)
+  const outcome = await executeTask(args.task, config)
   if (outcome.kind === 'pointers') {
     process.stdout.write(renderPointerList(outcome.pointers, { targetKind: 'cli' }) + '\n')
     return
@@ -291,13 +291,13 @@ async function commandLoop(args: CliArgs): Promise<void> {
   })
   const goal = ingressPacket.ucp.g
   const bounds = boundsFromFlags(args)
-  const config: LoopConfig = { projectRoot, goal, budget: budgetConfig, timeoutMs: timeout, bounds, triage: triageEnabled(args) }
+  const config: ExecuteConfig = { projectRoot, goal, budget: budgetConfig, timeoutMs: timeout, bounds, triage: triageEnabled(args) }
 
   info(`project: ${projectRoot}`)
   info(`task: ${args.task}`)
   info(`bounds: maxIter=${bounds.maxIterations} maxEscalation=${bounds.maxEscalationDepth} maxCost=${bounds.maxCost}`)
 
-  const outcome = await runLoop(args.task, config)
+  const outcome = await executeTask(args.task, config)
   if (outcome.kind === 'pointers') {
     process.stdout.write(renderPointerList(outcome.pointers, { targetKind: 'cli' }) + '\n')
     return

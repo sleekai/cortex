@@ -31,10 +31,11 @@ Task → Intent Compiler → Capability Planner → Context Compiler
 ```
 
 The pipeline lives in the **kernel** (`src/kernel/`: `planTask` / `prepareDispatch`
-in `kernel.ts`, `runTask` / `runLoop` in `dispatch-orchestrator.ts`,
+in `kernel.ts`, `executeTask` in `dispatch-orchestrator.ts`,
 `runBlueprint` in `blueprint-orchestrator.ts`). The CLI and the MCP server are
 thin surfaces over it; every surface persists artifacts, state, and metrics
-identically.
+identically. `cortex dispatch` and `cortex loop` are the same `executeTask`
+call with different bounds.
 
 - **Intent compiler** — deterministic regex-based classifier (zero model calls)
 - **Capability planner** — expected-utility ladder (EU = quality × reliability / cost × latency)

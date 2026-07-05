@@ -5,14 +5,26 @@ import { type BudgetResult } from '../packet/budget-controller.js'
 import { type RouterBounds } from '../loop/router.js'
 import { type MetricRecord } from '../state/metrics.js'
 import { type Artifact, isKind } from '../artifact/artifacts.js'
-import { type ContextService } from '../loop/context-service.js'
+import { type ContextService, defaultContextService } from '../loop/context-service.js'
+import { type ContextPolicy, DEFAULT_POLICIES } from '../policy/policies.js'
 import { runExecutionLoop, ladderProducer, type LoopEngineResult } from '../loop/loop-engine.js'
 import { saveArtifact, updateState } from '../state/store.js'
 import { appendMetric } from '../state/metrics.js'
+import { DEFAULT_BUDGET } from '../core/types.js'
 import { info } from '../core/logger.js'
 import { prepareDispatch, type PreparedDispatch, type KernelConfig } from './kernel.js'
 import { normalizeInput } from '../ingress/ingress.js'
 import { runTriage } from '../triage/pipeline.js'
+
+export interface ExecuteConfig extends KernelConfig {
+  // Router bounds for the CUEA loop. Absent means the loop engine's
+  // DEFAULT_BOUNDS — `cortex dispatch` and `cortex loop` are the same call
+  // with different defaults.
+  bounds?: RouterBounds
+  // Governs mid-loop context-on-demand fetches. Defaults to the default
+  // policy set's context policy.
+  contextPolicy?: ContextPolicy
+}
 
 export type TaskOutcome =
   | { kind: 'pointers'; intent: TaskIntent; plan: Plan; pointers: string[] }
@@ -68,7 +80,10 @@ export function triagedTask(task: string, config: KernelConfig): { task: string;
   return { task: cts.normalized_task, tierHint: cts.worker_recommendation }
 }
 
-export async function runTask(task: string, config: KernelConfig): Promise<TaskOutcome> {
+// The single execution entry: triage (opt-in) → plan → context → packet →
+// budget → CUEA loop with context-on-demand → persistence. `cortex dispatch`
+// and `cortex loop` are this call with different bounds.
+export async function executeTask(task: string, config: ExecuteConfig): Promise<TaskOutcome> {
   const triaged = triagedTask(task, config)
   const prepared = prepareDispatch(triaged.task, config, triaged.tierHint)
   if (prepared.kind === 'pointers') {
@@ -78,34 +93,13 @@ export async function runTask(task: string, config: KernelConfig): Promise<TaskO
     return { kind: 'refused', intent: prepared.intent, plan: prepared.plan, reason: prepared.reason }
   }
 
-  info('starting CUEA execution loop...')
-  const { loopResult } = await executePrepared(prepared, {
-    projectRoot: config.projectRoot,
-    timeoutMs: config.timeoutMs ?? 180_000,
-    maxOutputBytes: config.maxOutputBytes ?? 10 * 1024 * 1024,
-    onMetric: (record) => appendMetric(config.projectRoot, record),
-  })
-  return { kind: 'completed', intent: prepared.intent, plan: prepared.plan, ucp: prepared.ucp, result: loopResult }
-}
-
-export interface LoopConfig extends KernelConfig {
-  bounds?: RouterBounds
-}
-
-export type LoopOutcome =
-  | { kind: 'pointers'; intent: TaskIntent; plan: Plan; pointers: string[] }
-  | { kind: 'refused'; intent: TaskIntent; plan: Plan; reason: string }
-  | { kind: 'looped'; intent: TaskIntent; plan: Plan; ucp: UCP; result: LoopEngineResult }
-
-export async function runLoop(task: string, config: LoopConfig): Promise<LoopOutcome> {
-  const triaged = triagedTask(task, config)
-  const prepared = prepareDispatch(triaged.task, config, triaged.tierHint)
-  if (prepared.kind === 'pointers') {
-    return { kind: 'pointers', intent: prepared.intent, plan: prepared.plan, pointers: prepared.pointers }
-  }
-  if (prepared.kind === 'refused') {
-    return { kind: 'refused', intent: prepared.intent, plan: prepared.plan, reason: prepared.reason }
-  }
+  const budget = config.budget ?? DEFAULT_BUDGET
+  const contextService = defaultContextService(
+    config.projectRoot,
+    prepared.intent,
+    budget,
+    config.contextPolicy ?? DEFAULT_POLICIES.context,
+  )
 
   info('starting CUEA execution loop...')
   const { loopResult } = await executePrepared(prepared, {
@@ -113,7 +107,16 @@ export async function runLoop(task: string, config: LoopConfig): Promise<LoopOut
     timeoutMs: config.timeoutMs ?? 180_000,
     maxOutputBytes: config.maxOutputBytes ?? 10 * 1024 * 1024,
     bounds: config.bounds,
+    contextService,
     onMetric: (record) => appendMetric(config.projectRoot, record),
   })
-  return { kind: 'looped', intent: prepared.intent, plan: prepared.plan, ucp: prepared.ucp, result: loopResult }
+  return { kind: 'completed', intent: prepared.intent, plan: prepared.plan, ucp: prepared.ucp, result: loopResult }
 }
+
+// Deprecated aliases, kept for callers of the pre-collapse API. runTask and
+// runLoop were byte-for-byte twins differing only in bounds and outcome tag;
+// both are executeTask now.
+export const runTask = executeTask
+export const runLoop = executeTask
+export type LoopConfig = ExecuteConfig
+export type LoopOutcome = TaskOutcome

@@ -9,7 +9,7 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { DEFAULT_BUDGET, type BudgetConfig } from './core/types.js'
 import { loadRegistry } from './worker/registry.js'
 import { buildPrompt } from './worker/prompt.js'
-import { planTask, prepareDispatch, runTask, runBlueprint, runLocate, listWorkers, triagedTask, type BlueprintConfig } from './kernel/index.js'
+import { planTask, prepareDispatch, executeTask, runBlueprint, runLocate, listWorkers, triagedTask, type BlueprintConfig } from './kernel/index.js'
 import { getPolicySet, DEFAULT_POLICIES } from './policy/policies.js'
 import { renderBlueprintSummary } from './egress/egress.js'
 import { initProject } from './state/store.js'
@@ -184,7 +184,7 @@ server.registerTool('cortex_dispatch', {
       ]}
     }
 
-    const outcome = await runTask(args.task, config)
+    const outcome = await executeTask(args.task, config)
     if (outcome.kind === 'pointers') {
       return { content: [{ type: 'text', text: renderPointerList(outcome.pointers, { targetKind: 'mcp' }) }] }
     }

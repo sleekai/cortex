@@ -28,7 +28,7 @@ below are kept for the record.
         ┌──────────────────────────────────────────────────────┐
         │ kernel/ (orchestrators):                              │
         │  kernel.ts: planTask, prepareDispatch, runLocate     │
-        │  dispatch-orchestrator.ts: runTask, runLoop          │
+        │  dispatch-orchestrator.ts: executeTask               │
         │  blueprint-orchestrator.ts: runBlueprint             │
         │  barrel: index.ts re-exports all                     │
         └──────────────────────────────────────────────────────┘
@@ -129,7 +129,7 @@ Map and fragile control flow.
 | 7 Economic scheduler | utility optimization | **done** | `capability/planner.ts` EU scoring + spend gate + ladder |
 | 8 Execution graphs | DAG + retries + cancel + checkpoint + replay | **removed** | zero production consumers; deferred until a fan-out consumer exists (ADR-0001) |
 | 9 Progressive escalation | expand only when justified | **partial** | budget-gated climb exists; trigger narrow (§3.3) → deferred pending retrieval-quality metric |
-| 10 Kernel activation | kernel owns planning/scheduling/budget/policy | **done** | `kernel/kernel.ts`: planTask / prepareDispatch / runTask; CLI and MCP are surfaces |
+| 10 Kernel activation | kernel owns planning/scheduling/budget/policy | **done** | `kernel/kernel.ts`: planTask / prepareDispatch / executeTask; CLI and MCP are surfaces |
 
 Directive items **deliberately deferred**, with tradeoffs (Rule 6):
 
