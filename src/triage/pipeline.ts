@@ -13,7 +13,7 @@ import { type TriageContext, type TriagePolicy, DEFAULT_TRIAGE_POLICY } from './
 import { enabledSkills } from './registry.js'
 
 // Canonical stage order (spec §5). Skills not in this list run afterward.
-export const STAGE_ORDER = ['normalize', 'decompose', 'ambiguity', 'strategy', 'routing', 'context-filter'] as const
+export const STAGE_ORDER = ['normalize', 'ambiguity', 'routing'] as const
 
 export interface TriageInput {
   ucp: UCP

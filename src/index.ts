@@ -13,7 +13,7 @@ import { DEFAULT_BUDGET, type BudgetConfig } from './core/types.js'
 import { info, error as logError } from './core/logger.js'
 import { loadRegistry } from './worker/registry.js'
 import { buildPrompt } from './worker/prompt.js'
-import { planTask, prepareDispatch, runTask, runLoop, runBlueprint, runLocate, listWorkers, type LoopConfig, type BlueprintConfig } from './kernel/index.js'
+import { planTask, prepareDispatch, runTask, runLoop, runBlueprint, runLocate, listWorkers, triagedTask, type LoopConfig, type BlueprintConfig } from './kernel/index.js'
 import { registeredBlueprints } from './blueprint/blueprint.js'
 import { registeredSkills } from './skill/registry.js'
 import { getPolicySet, DEFAULT_POLICIES } from './policy/policies.js'
@@ -31,7 +31,6 @@ import { renderDispatchSummary, renderLoopSummary, renderPlanSummary, renderPoin
 // when --triage / CORTEX_TRIAGE is set, so the pipeline is inert by default.
 import './triage/skills/builtins.js'
 import { runTriage } from './triage/pipeline.js'
-import { type CTSPacket } from './triage/packet.js'
 import * as fs from 'node:fs'
 import * as path from 'node:path'
 
@@ -187,19 +186,10 @@ Examples:
 `)
 }
 
+// Opt-in CTS seam. Triage itself runs inside the kernel (once per task) when
+// the flag is on; the CLI only decides the flag.
 function triageEnabled(args: CliArgs): boolean {
   return args.triage === true || !!process.env['CORTEX_TRIAGE']
-}
-
-// Opt-in CTS seam: when enabled, run the triage pipeline and hand its
-// normalized task to the kernel. When disabled, returns args.task unchanged —
-// behaviour is byte-for-byte identical to the pre-CTS path.
-function applyTriage(ingressPacket: ReturnType<typeof ingressNormalize>, args: CliArgs): { task: string; cts?: CTSPacket } {
-  if (!triageEnabled(args)) return { task: args.task }
-  const cts = runTriage(ingressPacket)
-  info(`triage: recommend ${cts.worker_recommendation}, ${cts.subtasks.length} subtask(s), ambiguity ${cts.ambiguity.score.toFixed(2)}`)
-  for (const q of cts.ambiguity.questions) info(`triage clarify: ${q}`)
-  return { task: cts.normalized_task, cts }
 }
 
 async function commandRun(args: CliArgs): Promise<void> {
@@ -216,16 +206,16 @@ async function commandRun(args: CliArgs): Promise<void> {
     metadata: { projectRoot, budget: String(budget), timeout: String(timeout) },
   })
   const goal = ingressPacket.ucp.g
-  const { task } = applyTriage(ingressPacket, args)
-  const config = { projectRoot, goal, budget: budgetConfig, timeoutMs: timeout }
+  const config = { projectRoot, goal, budget: budgetConfig, timeoutMs: timeout, triage: triageEnabled(args) }
 
   info(`project: ${projectRoot}`)
-  info(`task: ${task}`)
+  info(`task: ${args.task}`)
   info(`goal: ${goal}`)
   info(`source: ${ingressPacket.source} session=${ingressPacket.sessionId ?? 'none'}`)
 
   if (args.dryRun) {
-    const prepared = prepareDispatch(task, config)
+    const triaged = triagedTask(args.task, config)
+    const prepared = prepareDispatch(triaged.task, config, triaged.tierHint)
     if (prepared.kind === 'pointers') {
       process.stdout.write(prepared.pointers.join('\n') + '\n')
       return
@@ -241,7 +231,7 @@ async function commandRun(args: CliArgs): Promise<void> {
     return
   }
 
-  const outcome = await runTask(task, config)
+  const outcome = await runTask(args.task, config)
   if (outcome.kind === 'pointers') {
     process.stdout.write(renderPointerList(outcome.pointers, { targetKind: 'cli' }) + '\n')
     return
@@ -300,15 +290,14 @@ async function commandLoop(args: CliArgs): Promise<void> {
     metadata: { projectRoot, budget: String(budget), timeout: String(timeout) },
   })
   const goal = ingressPacket.ucp.g
-  const { task } = applyTriage(ingressPacket, args)
   const bounds = boundsFromFlags(args)
-  const config: LoopConfig = { projectRoot, goal, budget: budgetConfig, timeoutMs: timeout, bounds }
+  const config: LoopConfig = { projectRoot, goal, budget: budgetConfig, timeoutMs: timeout, bounds, triage: triageEnabled(args) }
 
   info(`project: ${projectRoot}`)
-  info(`task: ${task}`)
+  info(`task: ${args.task}`)
   info(`bounds: maxIter=${bounds.maxIterations} maxEscalation=${bounds.maxEscalationDepth} maxCost=${bounds.maxCost}`)
 
-  const outcome = await runLoop(task, config)
+  const outcome = await runLoop(args.task, config)
   if (outcome.kind === 'pointers') {
     process.stdout.write(renderPointerList(outcome.pointers, { targetKind: 'cli' }) + '\n')
     return
@@ -408,8 +397,9 @@ function commandSkills(): void {
 function commandPlan(args: CliArgs): void {
   const projectRoot = args.dir ?? process.cwd()
   const ingressPacket = ingressNormalize({ content: args.task, kind: 'cli', explicitGoal: args.goal })
-  const { task, cts } = applyTriage(ingressPacket, args)
-  const { plan, intent } = planTask(task, projectRoot)
+  const cts = triageEnabled(args) ? runTriage(ingressPacket) : undefined
+  const task = cts?.normalized_task ?? args.task
+  const { plan, intent } = planTask(task, projectRoot, undefined, undefined, cts?.worker_recommendation)
   const data = {
     intent,
     entryTier: plan.entryTier,

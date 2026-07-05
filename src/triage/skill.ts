@@ -1,7 +1,7 @@
 // The CTS_Skill contract — a reusable, stateless cognitive module. Each skill
 // patches one slice of the draft CTSPacket. Skills are composable (spec §8):
-// downstream skills read upstream results off the shared draft, so ambiguity
-// can see subtasks and routing can see complexity signals.
+// downstream skills read upstream results off the shared draft, so routing
+// can see the normalized task and ambiguity score.
 //
 // Skills MUST NOT: call other Cortex layers (planner/scheduler/workers),
 // execute tools, fetch context, or call an LLM. Built-ins are deterministic.

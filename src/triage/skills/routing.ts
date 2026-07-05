@@ -2,7 +2,7 @@
 // for the scheduler, not a selection — CTS never picks a worker or dispatches.
 import { type TriageStage } from '../skill.js'
 import { type CtsTier } from '../packet.js'
-import { complexityOf, extractFileTokens, HUMAN_SIGNALS, LOCATE_VERBS, PATCH_VERBS } from '../signals.js'
+import { complexityOf, extractFileTokens, splitClauses, HUMAN_SIGNALS, LOCATE_VERBS, PATCH_VERBS } from '../signals.js'
 
 const ORDER: CtsTier[] = ['T0', 'T1', 'T2', 'T3', 'T4']
 
@@ -14,14 +14,17 @@ function bump(tier: CtsTier, by: number): CtsTier {
 export const routingSkill: TriageStage = {
   name: 'routing',
   purpose: 'Recommend a worker tier hint (T0–T4) for the scheduler.',
-  input_schema: { normalized_task: 'string', subtasks: 'CtsSubtask[]', ambiguity: 'CtsAmbiguity' },
+  input_schema: { normalized_task: 'string', ambiguity: 'CtsAmbiguity' },
   output_schema: { worker_recommendation: 'CtsTier' },
   cost_level: 'low',
   deterministic: true,
   execute(ctx) {
     const text = ctx.draft.normalized_task
     const fileCount = extractFileTokens(text).length
-    const complexity = complexityOf(text, fileCount, ctx.draft.subtasks.length)
+    // Clause count stands in for task breadth (the decompose stage that once
+    // supplied a subtask count was removed — output had no reader).
+    const clauseCount = Math.max(1, splitClauses(text).length)
+    const complexity = complexityOf(text, fileCount, clauseCount)
     const score = ctx.draft.ambiguity.score
 
     // Human-in-loop / browser work overrides everything.
@@ -41,7 +44,7 @@ export const routingSkill: TriageStage = {
       tier = 'T3'
     } else {
       // bounded: a small, clear, few-file task is cheap (T1); otherwise mid (T2).
-      tier = score >= 0.7 && fileCount <= 2 && ctx.draft.subtasks.length <= 3 ? 'T1' : 'T2'
+      tier = score >= 0.7 && fileCount <= 2 && clauseCount <= 3 ? 'T1' : 'T2'
     }
 
     // High ambiguity needs stronger reasoning to resolve — raise one tier.

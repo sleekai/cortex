@@ -15,7 +15,7 @@ interface Signal {
 export const ambiguitySkill: TriageStage = {
   name: 'ambiguity',
   purpose: 'Detect missing requirements, vague terms, underspecification, and conflicts.',
-  input_schema: { normalized_task: 'string', subtasks: 'CtsSubtask[]' },
+  input_schema: { normalized_task: 'string' },
   output_schema: { ambiguity: 'CtsAmbiguity' },
   cost_level: 'low',
   deterministic: true,

@@ -27,6 +27,11 @@ export interface KernelConfig {
   policy?: Policy
   timeoutMs?: number
   maxOutputBytes?: number
+  // Opt-in CTS seam: when true, the triage pipeline runs once inside the
+  // kernel — its normalized task and tier hint feed planning. When false or
+  // absent, triage never runs and planning sees the raw task (pre-CTS
+  // behaviour).
+  triage?: boolean
 }
 
 export interface PlannedTask {

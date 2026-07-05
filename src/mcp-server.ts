@@ -9,7 +9,7 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { DEFAULT_BUDGET, type BudgetConfig } from './core/types.js'
 import { loadRegistry } from './worker/registry.js'
 import { buildPrompt } from './worker/prompt.js'
-import { planTask, prepareDispatch, runTask, runBlueprint, runLocate, listWorkers, type BlueprintConfig } from './kernel/index.js'
+import { planTask, prepareDispatch, runTask, runBlueprint, runLocate, listWorkers, triagedTask, type BlueprintConfig } from './kernel/index.js'
 import { getPolicySet, DEFAULT_POLICIES } from './policy/policies.js'
 import { renderBlueprintSummary } from './egress/egress.js'
 import { initProject } from './state/store.js'
@@ -40,11 +40,8 @@ function resolveDir(dir?: string): string {
   return dir ?? process.cwd()
 }
 
-// Opt-in CTS seam: normalize the task via triage when requested, else pass the
-// raw task through unchanged (byte-for-byte identical to the pre-CTS path).
-function applyTriage(ingressPacket: ReturnType<typeof ingressNormalize>, rawTask: string, enabled?: boolean): string {
-  return enabled ? runTriage(ingressPacket).normalized_task : rawTask
-}
+// Opt-in CTS seam. Triage itself runs inside the kernel (once per task) when
+// config.triage is set; this surface only forwards the flag.
 
 server.registerTool('cortex_plan', {
   title: 'cortex-plan',
@@ -56,7 +53,7 @@ server.registerTool('cortex_plan', {
     const ingressPacket = ingressNormalize({ content: args.task, kind: 'mcp', explicitGoal: args.goal, metadata: { projectRoot } })
     const cts = args.triage ? runTriage(ingressPacket) : undefined
     const task = cts ? cts.normalized_task : args.task
-    const { intent, plan } = planTask(task, projectRoot)
+    const { intent, plan } = planTask(task, projectRoot, undefined, undefined, cts?.worker_recommendation)
     const data = {
       intent,
       plan,
@@ -161,16 +158,17 @@ server.registerTool('cortex_dispatch', {
       explicitGoal: args.goal,
       metadata: { projectRoot, budget: String(budget) },
     })
-    const task = applyTriage(ingressPacket, args.task, args.triage)
     const config = {
       projectRoot,
       goal: ingressPacket.ucp.g,
       budget: budgetConfig,
       timeoutMs: args.timeout ?? 180_000,
+      triage: args.triage ?? false,
     }
 
     if (args.dry_run) {
-      const prepared = prepareDispatch(task, config)
+      const triaged = triagedTask(args.task, config)
+      const prepared = prepareDispatch(triaged.task, config, triaged.tierHint)
       if (prepared.kind === 'pointers') {
         return { content: [{ type: 'text', text: renderPointerList(prepared.pointers, { targetKind: 'mcp' }) }] }
       }
@@ -186,7 +184,7 @@ server.registerTool('cortex_dispatch', {
       ]}
     }
 
-    const outcome = await runTask(task, config)
+    const outcome = await runTask(args.task, config)
     if (outcome.kind === 'pointers') {
       return { content: [{ type: 'text', text: renderPointerList(outcome.pointers, { targetKind: 'mcp' }) }] }
     }

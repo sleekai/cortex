@@ -54,11 +54,23 @@ async function executePrepared(
 
 export { executePrepared }
 
-export async function runTask(task: string, config: KernelConfig): Promise<TaskOutcome> {
+// Opt-in CTS seam: triage runs at most once, here. When config.triage is
+// off, planning sees the raw task and no tier hint — pre-CTS behaviour.
+// Exported so read-only previews (CLI --dry-run, MCP plan) show exactly what
+// a real run would dispatch.
+export function triagedTask(task: string, config: KernelConfig): { task: string; tierHint?: string } {
+  if (!config.triage) return { task }
   const goal = config.goal ?? task
   const ingress = normalizeInput({ content: task, kind: 'unknown', explicitGoal: goal })
-  const triage = runTriage({ ucp: ingress.ucp, raw: task })
-  const prepared = prepareDispatch(task, config, triage.worker_recommendation)
+  const cts = runTriage({ ucp: ingress.ucp, raw: task })
+  info(`triage: recommend ${cts.worker_recommendation}, ambiguity ${cts.ambiguity.score.toFixed(2)}`)
+  for (const q of cts.ambiguity.questions) info(`triage clarify: ${q}`)
+  return { task: cts.normalized_task, tierHint: cts.worker_recommendation }
+}
+
+export async function runTask(task: string, config: KernelConfig): Promise<TaskOutcome> {
+  const triaged = triagedTask(task, config)
+  const prepared = prepareDispatch(triaged.task, config, triaged.tierHint)
   if (prepared.kind === 'pointers') {
     return { kind: 'pointers', intent: prepared.intent, plan: prepared.plan, pointers: prepared.pointers }
   }
@@ -86,10 +98,8 @@ export type LoopOutcome =
   | { kind: 'looped'; intent: TaskIntent; plan: Plan; ucp: UCP; result: LoopEngineResult }
 
 export async function runLoop(task: string, config: LoopConfig): Promise<LoopOutcome> {
-  const goal = config.goal ?? task
-  const ingress = normalizeInput({ content: task, kind: 'unknown', explicitGoal: goal })
-  const triage = runTriage({ ucp: ingress.ucp, raw: task })
-  const prepared = prepareDispatch(task, config, triage.worker_recommendation)
+  const triaged = triagedTask(task, config)
+  const prepared = prepareDispatch(triaged.task, config, triaged.tierHint)
   if (prepared.kind === 'pointers') {
     return { kind: 'pointers', intent: prepared.intent, plan: prepared.plan, pointers: prepared.pointers }
   }
