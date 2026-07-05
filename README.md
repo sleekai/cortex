@@ -90,6 +90,8 @@ Interactive with no flags, or one-shot:
 
 ```bash
 cortex add-worker opencode                          # zero-config adapter
+cortex add-worker codex                             # zero-config adapter
+cortex add-worker cursor                            # zero-config adapter
 cortex add-worker claude-cli                        # zero-config adapter
 cortex add-worker openai --model gpt-4o-mini --id openai-cheap
 cortex add-worker anthropic --model claude-sonnet-4-20250514

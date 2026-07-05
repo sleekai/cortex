@@ -22,7 +22,7 @@ import { DEFAULT_BOUNDS, type RouterBounds } from './loop/router.js'
 import { isKind } from './artifact/artifacts.js'
 import { initProject } from './state/store.js'
 import { readMetrics, aggregateStats } from './state/metrics.js'
-import { TEMPLATES, type TemplateKind, openAiTemplate, anthropicTemplate, chatGptTemplate, ollamaTemplate, cliTemplate, httpTemplate, opencodeAdapter, claudeCliAdapter } from './worker/templates.js'
+import { TEMPLATES, type TemplateKind, openAiTemplate, anthropicTemplate, chatGptTemplate, ollamaTemplate, cliTemplate, httpTemplate, opencodeAdapter, codexAdapter, cursorAdapter, claudeCliAdapter } from './worker/templates.js'
 import { type WorkerSpec } from './worker/registry.js'
 import { normalizeInput as ingressNormalize } from './ingress/ingress.js'
 import { renderDispatchSummary, renderLoopSummary, renderPlanSummary, renderPointerList } from './egress/egress.js'
@@ -619,6 +619,16 @@ function buildSpecFromFlags(args: CliArgs): WorkerSpec {
         id: workerId,
         writeAccess: (args.writeAccess as 'none' | 'patch') ?? 'patch',
       })
+    case 'codex':
+      return codexAdapter({
+        id: workerId,
+        writeAccess: (args.writeAccess as 'none' | 'patch') ?? 'patch',
+      })
+    case 'cursor':
+      return cursorAdapter({
+        id: workerId,
+        writeAccess: (args.writeAccess as 'none' | 'patch') ?? 'patch',
+      })
     case 'claude-cli':
       return claudeCliAdapter({
         id: workerId,
@@ -671,6 +681,18 @@ async function commandAddWorker(args: CliArgs): Promise<void> {
         process.stdout.write('\n── opencode adapter ────────────────────────────\n')
         spec = opencodeAdapter({
           id: await ask(rli, 'Worker id', 'opencode'),
+        })
+        break
+      case 'codex':
+        process.stdout.write('\n── codex adapter ───────────────────────────────\n')
+        spec = codexAdapter({
+          id: await ask(rli, 'Worker id', 'codex'),
+        })
+        break
+      case 'cursor':
+        process.stdout.write('\n── cursor adapter ──────────────────────────────\n')
+        spec = cursorAdapter({
+          id: await ask(rli, 'Worker id', 'cursor'),
         })
         break
       case 'claude-cli':
