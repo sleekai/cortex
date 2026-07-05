@@ -15,6 +15,10 @@ export interface Evaluation {
   // for stabilization: a confidence that stops moving means more loops won't.
   confidence: number
   issues: string[]
+  // Context-on-demand (MVP §6): needs, not requests. Symbols/files the output
+  // failed over; the loop engine consults its context provider (policy-gated)
+  // before the next attempt. The Evaluator itself never fetches anything.
+  missingContext?: string[]
 }
 
 export interface EvaluatorInput {
@@ -51,8 +55,31 @@ export function hookDecisionEvaluator(input: EvaluatorInput): Evaluation {
     // single failing hook is a near-miss; a wall of errors is a bad approach.
     const n = validation.errors.length
     const confidence = Math.max(0.2, 1 - Math.min(n, 5) / 5)
-    return { decision: 'RETRY', confidence, issues: validation.errors }
+    const missing = extractMissingContext(validation.errors)
+    return { decision: 'RETRY', confidence, issues: validation.errors, ...(missing.length > 0 ? { missingContext: missing } : {}) }
   }
 
   return { decision: 'ACCEPT', confidence: 0.8, issues: [] }
+}
+
+// Missing-context extraction: validation errors that name an unresolved
+// symbol, module, or file are expressed as needs the runtime can act on.
+// Deliberately narrow — a wrong guess costs a wasted context fetch, so only
+// unambiguous compiler/loader shapes match.
+const MISSING_PATTERNS = [
+  /cannot find (?:name|module) ['"‘]?([\w./@-]+)/i,
+  /['"‘]?([\w./@-]+)['"’]? is not defined/i,
+  /no such file or directory[,:]? (?:open )?['"‘]?([\w./@-]+)/i,
+  /module not found[^'"]*['"]([\w./@-]+)/i,
+]
+
+export function extractMissingContext(errors: string[]): string[] {
+  const needs = new Set<string>()
+  for (const err of errors) {
+    for (const pattern of MISSING_PATTERNS) {
+      const m = pattern.exec(err)
+      if (m?.[1]) needs.add(m[1])
+    }
+  }
+  return [...needs]
 }

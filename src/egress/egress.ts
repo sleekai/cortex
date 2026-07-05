@@ -173,6 +173,18 @@ registerRenderer('failure', (artifact, options) => {
   return `FAILURE [${tag}]: ${reason}`
 })
 
+registerRenderer('clarification', (artifact, options) => {
+  if (!isKind(artifact, 'clarification')) return jsonRender(artifact, options)
+  const { questions, reason } = artifact.body
+  if (options.targetKind === 'mcp') {
+    return JSON.stringify({ questions, reason })
+  }
+  const lines: string[] = ['CLARIFICATION NEEDED']
+  if (reason) lines.push(`Reason: ${reason}`)
+  for (const q of questions) lines.push(`  ? ${q}`)
+  return lines.join('\n')
+})
+
 registerRenderer('token-estimate', (artifact, options) => {
   if (!isKind(artifact, 'token-estimate')) return jsonRender(artifact, options)
   const { inputTokens, outputTokens, expectedSpend } = artifact.body
@@ -277,6 +289,57 @@ export function renderLoopSummary(summary: LoopSummary, options: EgressOptions):
   if (!summary.accepted && summary.issues.length > 0) {
     lines.push('', '  Open issues:')
     for (const e of summary.issues) lines.push(`    - ${e}`)
+  }
+  if (options.includeMetadata && options.metadata) {
+    lines.push('', ...metadataBlock(options.metadata))
+  }
+  lines.push(border, '')
+  return lines.join('\n')
+}
+
+// Blueprint run result (MVP): which blueprint ran, which steps executed or
+// were skipped (and why), the loop telemetry when a produce step ran, and the
+// rendered artifacts. Mirrors renderLoopSummary's frame.
+export interface BlueprintSummary {
+  taskId: string
+  blueprint: string
+  kind: 'clarification' | 'completed'
+  accepted: boolean
+  steps: { id: string; kind: string; ran: boolean; reason?: string }[]
+  questions: string[]
+  artifacts: Artifact[]
+  produce?: { iterations: number; escalationDepth: number; cost: number; terminationReason: string; status: string }
+}
+
+export function renderBlueprintSummary(summary: BlueprintSummary, options: EgressOptions): string {
+  if (options.targetKind === 'mcp') {
+    return JSON.stringify(summary)
+  }
+  const border = '═'.repeat(60)
+  const verdict = summary.kind === 'clarification' ? 'NEEDS CLARIFICATION' : summary.accepted ? 'ACCEPTED' : 'STOPPED'
+  const lines: string[] = [
+    '',
+    border,
+    `  CORTEX BLUEPRINT: ${verdict}  (${summary.blueprint})`,
+    border,
+    `  Task:    ${summary.taskId}`,
+    '',
+    '  Steps:',
+  ]
+  for (const s of summary.steps) {
+    lines.push(`    ${s.ran ? '✓' : '·'} ${s.id} (${s.kind})${s.reason ? ` — ${s.reason}` : ''}`)
+  }
+  if (summary.produce) {
+    lines.push('', `  Loop:    ${summary.produce.iterations} iter, ${summary.produce.escalationDepth} escalation(s), cost ${summary.produce.cost.toFixed(2)}`)
+    lines.push(`  Stop:    ${summary.produce.terminationReason}`)
+  }
+  if (summary.questions.length > 0) {
+    lines.push('', '  Questions:')
+    for (const q of summary.questions) lines.push(`    ? ${q}`)
+  }
+  if (summary.artifacts.length > 0) {
+    lines.push('', '  Artifacts:')
+    for (const a of summary.artifacts) lines.push(`    - ${a.kind} (${a.id}) by ${a.producedBy}`)
   }
   if (options.includeMetadata && options.metadata) {
     lines.push('', ...metadataBlock(options.metadata))

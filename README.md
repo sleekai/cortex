@@ -57,6 +57,10 @@ deliberate deferrals.
 |---------|-------------|
 | `cortex init` | Scaffold `.cortex/` state directory |
 | `cortex dispatch <task>` | Dispatch a task to the best worker |
+| `cortex loop <task>` | CUEA closed loop: Producer → Evaluator → Router |
+| `cortex exec <task>` | Blueprint execution: triage → skills → closed loop |
+| `cortex blueprints` | List registered execution blueprints |
+| `cortex skills` | List registered execution skills |
 | `cortex plan <task>` | Print dispatch plan, zero model calls |
 | `cortex locate <query>` | Deterministic code pointers |
 | `cortex workers` | List registered workers |
@@ -64,6 +68,22 @@ deliberate deferrals.
 | `cortex add-worker [provider]` | Register a worker from a template |
 
 `cortex run` is an alias for `cortex dispatch`.
+
+### Blueprint execution
+
+`cortex exec` runs the full execution model: the triage *skill* classifies
+the task and recommends a *blueprint* (`debug`, `feature`, `pr-review`,
+`default`); the runner executes its steps — skills conditionally, `produce`
+steps through the closed loop — under a named *policy set*. Ambiguous tasks
+halt with clarification questions (exit code 2) instead of burning tokens.
+
+```bash
+cortex exec "fix the login crash" --blueprint debug --policies generous
+cortex exec "add pagination to the users endpoint"   # triage picks 'feature'
+```
+
+Skills, blueprints, and policy sets are all registries — see
+`docs/EXTENDING.md` for the plugin guide.
 
 ### Adding workers
 
@@ -84,7 +104,7 @@ Workers land in `.cortex/workers.json` — data, hot-swappable, no kernel code.
 
 `cortex-mcp` (stdio) exposes the kernel to any MCP client: `cortex_plan`,
 `cortex_locate`, `cortex_workers`, `cortex_metrics`, `cortex_dispatch`,
-`cortex_init`, plus a `cortex://registry` resource.
+`cortex_exec`, `cortex_init`, plus a `cortex://registry` resource.
 
 ```json
 { "mcpServers": { "cortex": { "command": "npx", "args": ["cortex-mcp"] } } }

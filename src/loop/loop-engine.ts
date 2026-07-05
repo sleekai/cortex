@@ -37,6 +37,9 @@ export interface ProducerContext {
   rung: number
   attempt: number
   issues: string[]
+  // True when the engine's context provider returned new chunks since the
+  // last attempt — a retry should then re-send full context, not errors-only.
+  contextRefreshed?: boolean
 }
 
 export interface Production {
@@ -66,6 +69,12 @@ export interface LoopEngineOptions {
   // loop rather than re-dispatching the top worker forever.
   ladderSize: number
   onStep?: (step: LoopStep) => void
+  // Context-on-demand seam (MVP §6): when an Evaluation names missing context
+  // and the loop continues, the engine asks this provider for a refreshed
+  // chunk set before the next attempt. The provider owns policy (whether and
+  // how often to actually fetch) — returning the current chunks unchanged is
+  // a legal "no". Absent provider ⇒ behavior identical to before.
+  contextProvider?: (needs: string[], current: CodeChunk[]) => Promise<CodeChunk[]>
 }
 
 export interface LoopEngineResult {
@@ -88,13 +97,16 @@ export async function runExecutionLoop(
   let state = initialState()
   let rung = 0
   let issues: string[] = []
+  let currentChunks = chunks
+  let contextRefreshed = false
 
   // Bounded by construction: the Router terminates on ACCEPT/FINISH, on any
   // §6 bound, or on convergence; escalation is capped by both the depth bound
   // and the physical ladder. The extra guard mirrors maxIterations so a
   // malformed custom Router can never spin forever.
   for (let guard = 0; guard <= bounds.maxIterations; guard++) {
-    const production = await producer({ packet, chunks, rung, attempt: state.iteration, issues })
+    const production = await producer({ packet, chunks: currentChunks, rung, attempt: state.iteration, issues, contextRefreshed })
+    contextRefreshed = false
     const evaluation = await evaluator({
       output: production.artifact,
       validation: production.validation,
@@ -133,6 +145,16 @@ export async function runExecutionLoop(
 
     // 'loop' and 'escalate' both carry the issues forward as refinement context.
     issues = evaluation.issues
+
+    // Context-on-demand: the Evaluator expressed needs; the provider (which
+    // owns the context policy) decides whether the next attempt gets more.
+    if (evaluation.missingContext && evaluation.missingContext.length > 0 && options.contextProvider) {
+      const refreshed = await options.contextProvider(evaluation.missingContext, currentChunks)
+      if (refreshed !== currentChunks) {
+        currentChunks = refreshed
+        contextRefreshed = true
+      }
+    }
   }
 
   // Unreachable when the Router honors maxIterations; kept as a hard backstop.
@@ -156,11 +178,14 @@ export function ladderProducer(
     const scored = ladder[idx]!
 
     // On a same-tier retry, hand the worker the failing errors, not the whole
-    // context again — the packet already delivered the goal once.
-    const packet = ctx.attempt > 0 && ctx.issues.length > 0
+    // context again — the packet already delivered the goal once. Exception:
+    // when the engine fetched context the Evaluator asked for, the retry must
+    // carry the full packet so the new chunks actually reach the worker.
+    const errorOnlyRetry = ctx.attempt > 0 && ctx.issues.length > 0 && !ctx.contextRefreshed
+    const packet = errorOnlyRetry
       ? generateErrorPacket(ctx.packet.t, ctx.packet.g, ctx.issues.join('\n').slice(0, 600), ctx.issues[0]!, ctx.attempt)
       : ctx.packet
-    const chunks = ctx.attempt > 0 && ctx.issues.length > 0 ? [] : ctx.chunks
+    const chunks = errorOnlyRetry ? [] : ctx.chunks
 
     const result = await dispatchWithLadder(packet, chunks, [scored], dispatchOptions)
 

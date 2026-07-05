@@ -15,6 +15,7 @@ export type ArtifactKind =
   | 'intent'
   | 'metric'
   | 'failure'
+  | 'clarification'
 
 export type ReviewSeverity = 'R' | 'Y' | 'G'
 
@@ -35,6 +36,7 @@ export interface ArtifactBodies {
   'intent': Record<string, unknown>
   'metric': Record<string, unknown>
   'failure': { reason: string; recoverable: boolean }
+  'clarification': { questions: string[]; reason: string }
 }
 
 export interface Artifact<K extends ArtifactKind = ArtifactKind> {

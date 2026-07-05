@@ -57,6 +57,20 @@ cortex   (package: @sleekai/cortex)
       types.ts          shared primitives (chunks, budgets) — extended, kept
       logger.ts         kept
       tokens.ts         single token-estimation source (dedup of 2 copies)
+    skill/
+      skill.ts          generic Skill contract: applicable/execute/observations
+      registry.ts       execution-skill registry (pluggability seam)
+      builtins.ts       triage, grilling, summarize, review skills
+    blueprint/
+      blueprint.ts      Blueprint types + registry (workflows as data)
+      builtins.ts       debug, feature, pr-review, default blueprints
+      runner.ts         step executor: skills conditionally, produce = CUEA loop
+    policy/
+      policies.ts       PolicySet (retry/escalation/clarification/context/
+                        budget/timeout) + named-set registry; Router bounds
+                        are a projection of a policy set
+    compiler/
+      runtime.ts        Intent/Context/Artifact compiler facade, replaceable
     loop/
       execution-state.ts  ExecutionState record + pure reducers (iteration,
                           cost, escalationDepth, history, status)
@@ -403,6 +417,19 @@ same fields it already documents, now typed and validated by the kernel.
    `test/router.test.ts` (12 unit tests), `test/loop-engine.test.ts`
    (integration: accept, retry, escalate, max iterations, ladder exhaustion,
    determinism).
+
+7. **MVP execution model** — generic Skill layer (`skill/`: the primitive
+   execution unit; triage and grilling are ordinary skills), Execution
+   Blueprints (`blueprint/`: workflows as registered data; debug / feature /
+   pr-review / default built-ins; the runtime knows nothing about any of
+   them), first-class Policies (`policy/`: retry, escalation, clarification,
+   context, budget, timeout — Router bounds are a projection), Compiler
+   Runtime facade (`compiler/runtime.ts`: Intent/Context/Artifact services,
+   replaceable), context-on-demand in the loop (Evaluations express
+   `missingContext`; a policy-gated provider fetches minimal context
+   mid-loop), a `clarification` artifact kind, and the `runBlueprint` kernel
+   entry surfaced as `cortex exec` and MCP `cortex_exec`. Extension guide:
+   `docs/EXTENDING.md`.
 
 Each phase compiles and tests green before the next begins.
 

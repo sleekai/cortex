@@ -11,7 +11,9 @@ import { compileIntent } from './capability/intent-compiler.js'
 import { loadRegistry } from './worker/registry.js'
 import { compileContext } from './retrieval/context-compiler.js'
 import { buildPrompt } from './worker/prompt.js'
-import { planTask, prepareDispatch, runTask } from './kernel/kernel.js'
+import { planTask, prepareDispatch, runTask, runBlueprint, type BlueprintConfig } from './kernel/kernel.js'
+import { getPolicySet, DEFAULT_POLICIES } from './policy/policies.js'
+import { renderBlueprintSummary } from './egress/egress.js'
 import { initProject } from './state/store.js'
 import { readMetrics, aggregateStats } from './state/metrics.js'
 import { createHarness } from './harness/harness.js'
@@ -221,6 +223,52 @@ server.registerTool('cortex_dispatch', {
     }
 
     return { content: [{ type: 'text', text: output.join('\n') }] }
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : String(e)
+    return { content: [{ type: 'text', text: `error: ${msg}` }], isError: true }
+  }
+})
+
+server.registerTool('cortex_exec', {
+  title: 'cortex-exec',
+  description: 'Blueprint execution: triage recommends a blueprint, skills run conditionally, produce steps run the CUEA closed loop with context-on-demand. Makes model calls. May return clarification questions instead of a result.',
+  inputSchema: {
+    ...taskSchema,
+    ...goalSchema,
+    ...dirSchema,
+    blueprint: z.string().optional().describe('Blueprint name (default: triage recommendation; built-ins: debug, feature, pr-review, default)'),
+    policies: z.string().optional().describe('Named policy set (default | strict | generous)'),
+    budget: z.number().optional().describe('Max input tokens (default: policy set budget)'),
+    timeout: z.number().optional().describe('Worker timeout in ms (default: policy set timeout)'),
+  },
+}, async (args) => {
+  try {
+    const projectRoot = resolveDir(args.dir)
+    const policies = args.policies ? getPolicySet(args.policies) : DEFAULT_POLICIES
+    if (!policies) {
+      return { content: [{ type: 'text', text: `error: unknown policy set "${args.policies}"` }], isError: true }
+    }
+    const config: BlueprintConfig = {
+      projectRoot,
+      policies,
+      raw: args.task,
+      ...(args.goal ? { goal: args.goal } : {}),
+      ...(args.blueprint ? { blueprint: args.blueprint } : {}),
+      ...(args.budget ? { budget: { ...DEFAULT_BUDGET, maxInputTokens: args.budget } } : {}),
+      ...(args.timeout ? { timeoutMs: args.timeout } : {}),
+    }
+    const outcome = await runBlueprint(args.task, config)
+    const text = renderBlueprintSummary({
+      taskId: outcome.artifacts[0]?.taskId ?? '',
+      blueprint: outcome.blueprint,
+      kind: outcome.kind,
+      accepted: outcome.kind === 'completed' ? outcome.accepted : false,
+      steps: outcome.steps,
+      questions: outcome.kind === 'clarification' ? outcome.questions : [],
+      artifacts: outcome.artifacts,
+      ...(outcome.kind === 'completed' && outcome.produce ? { produce: outcome.produce.summary } : {}),
+    }, { targetKind: 'mcp' })
+    return { content: [{ type: 'text', text }] }
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : String(e)
     return { content: [{ type: 'text', text: `error: ${msg}` }], isError: true }
