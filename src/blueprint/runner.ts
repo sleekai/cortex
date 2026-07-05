@@ -10,6 +10,7 @@ import { type Skill, type SkillContext, type SkillDispatch, type SkillOutcome } 
 import { getSkill } from '../skill/registry.js'
 import { type Blueprint, type BlueprintRunView } from './blueprint.js'
 import { info, warn } from '../core/logger.js'
+import { compressArtifact, makeCompressionArtifact } from '../runtime/compression.js'
 
 // What a `produce` step returns — the kernel wires this to prepareDispatch +
 // the CUEA loop so the runner never imports the kernel (no cycle).
@@ -72,6 +73,9 @@ export async function executeBlueprint(blueprint: Blueprint, config: BlueprintRu
       info(`blueprint ${blueprint.name}: step ${step.id} → produce`)
       const result = await config.produce(view())
       artifacts.push(...result.artifacts)
+      for (const artifact of result.artifacts.filter(a => a.kind !== 'compression')) {
+        artifacts.push(makeCompressionArtifact(config.taskId, artifact.kind, compressArtifact(artifact)))
+      }
       blackboard['produce'] = result.summary
       lastProduce = result
       steps.push({ id: step.id, kind: 'produce', ran: true })
@@ -109,6 +113,9 @@ export async function executeBlueprint(blueprint: Blueprint, config: BlueprintRu
     info(`blueprint ${blueprint.name}: step ${step.id} → skill ${skill.name}`)
     const outcome = await skill.execute(ctx)
     artifacts.push(...outcome.artifacts)
+    for (const artifact of outcome.artifacts.filter(a => a.kind !== 'compression')) {
+      artifacts.push(makeCompressionArtifact(config.taskId, artifact.kind, compressArtifact(artifact)))
+    }
     if (outcome.data) blackboard[skill.name] = outcome.data
     steps.push({ id: step.id, kind: 'skill', ran: true })
     config.onStep?.(step.id, outcome)

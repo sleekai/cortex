@@ -73,16 +73,16 @@ export async function runBlueprint(task: string, config: BlueprintConfig): Promi
 
     if (prepared.kind === 'pointers') {
       const artifact = makeArtifact('pointer-set', taskId, 'kernel', { pointers: prepared.pointers })
-      return { artifacts: [artifact], accepted: true, summary: { iterations: 0, escalationDepth: 0, cost: 0, terminationReason: 'tier-0 pointers', status: 'finished' } }
+      return { artifacts: [...prepared.artifacts, artifact], accepted: true, summary: { iterations: 0, escalationDepth: 0, cost: 0, terminationReason: 'tier-0 pointers', status: 'finished' } }
     }
     if (prepared.kind === 'refused') {
       const artifact = makeArtifact('failure', taskId, 'kernel', { reason: prepared.reason, recoverable: false })
-      return { artifacts: [artifact], accepted: false, summary: { iterations: 0, escalationDepth: 0, cost: 0, terminationReason: `budget refused: ${prepared.reason}`, status: 'finished' } }
+      return { artifacts: [...prepared.artifacts, artifact], accepted: false, summary: { iterations: 0, escalationDepth: 0, cost: 0, terminationReason: `budget refused: ${prepared.reason}`, status: 'finished' } }
     }
 
     const contextService = defaultContextService(config.projectRoot, prepared.intent, budget, policies.context)
 
-    const { loopResult } = await executePrepared(prepared, {
+    const { loopResult, artifacts } = await executePrepared(prepared, {
       projectRoot: config.projectRoot,
       timeoutMs: config.timeoutMs ?? policies.timeout.workerTimeoutMs,
       maxOutputBytes: config.maxOutputBytes ?? 10 * 1024 * 1024,
@@ -92,7 +92,7 @@ export async function runBlueprint(task: string, config: BlueprintConfig): Promi
     })
 
     return {
-      artifacts: loopResult.finalOutput ? [loopResult.finalOutput] : [],
+      artifacts,
       accepted: loopResult.accepted,
       summary: {
         iterations: loopResult.state.iteration,

@@ -19,6 +19,8 @@ export interface NodeResult {
   artifact: Artifact
   latencyMs: number
   attempts: number
+  estInputTokens: number
+  estOutputTokens: number
 }
 
 export interface DispatchOptions {
@@ -54,12 +56,15 @@ export async function dispatchOne(
       }),
       latencyMs: 0,
       attempts: 0,
+      estInputTokens,
+      estOutputTokens: 0,
     }
   }
 
   info(`dispatch: ${packet.t} → ${worker.worker.id} (tier ${worker.worker.tier}, ${worker.justification})`)
 
   const result = await harness.invoke({ prompt, timeoutMs: options.timeoutMs, maxOutputBytes: options.maxOutputBytes })
+  const estOutputTokens = estimateTokens(result.output)
   const artifact: Artifact = result.ok
     ? parseWorkerOutput(result.output, packet, worker.worker.id)
     : makeArtifact('failure', packet.t, worker.worker.id, { reason: result.failReason ?? 'harness failure', recoverable: true })
@@ -74,10 +79,10 @@ export async function dispatchOne(
     ok: !failed,
     latencyMs: result.latencyMs,
     estInputTokens,
-    estOutputTokens: estimateTokens(result.output),
+    estOutputTokens,
     iterations: 1,
     ...(failed ? { failReason: (artifact as Artifact<'failure'>).body.reason } : {}),
   })
 
-  return { nodeId: packet.t, workerId: worker.worker.id, artifact, latencyMs: result.latencyMs, attempts: 1 }
+  return { nodeId: packet.t, workerId: worker.worker.id, artifact, latencyMs: result.latencyMs, attempts: 1, estInputTokens, estOutputTokens }
 }

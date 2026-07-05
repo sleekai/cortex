@@ -24,6 +24,8 @@ export interface HistoryEntry {
   // Spend for this attempt in the worker's relative cost units.
   cost: number
   latencyMs: number
+  promptTokens?: number
+  completionTokens?: number
 }
 
 export interface ExecutionState {

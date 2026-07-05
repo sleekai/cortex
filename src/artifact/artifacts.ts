@@ -5,13 +5,21 @@
 import * as crypto from 'node:crypto'
 
 export type ArtifactKind =
+  | 'triage'
+  | 'grill'
+  | 'context'
   | 'patch'
   | 'plan'
+  | 'execution'
+  | 'evaluation'
+  | 'final'
   | 'decision'
   | 'review'
   | 'test-result'
   | 'pointer-set'
   | 'token-estimate'
+  | 'compression'
+  | 'cost'
   | 'intent'
   | 'metric'
   | 'failure'
@@ -26,13 +34,67 @@ export interface ReviewFinding {
 }
 
 export interface ArtifactBodies {
+  'triage': {
+    normalizedTask: string
+    blueprint: string
+    entryTier: string
+    ambiguityScore: number
+    capabilities: string[]
+    confidence: number
+  }
+  'grill': { questions: string[]; reason: string; ambiguityScore: number }
+  'context': {
+    level: number
+    pointers: string[]
+    chunkCount: number
+    estimatedTokens: number
+    compressedText: string
+  }
   'patch': { diff: string; reasoning: string }
-  'plan': { steps: string[] }
+  'plan': { steps: string[]; workerLadder?: string[]; entryTier?: number; expectedSpend?: number }
+  'execution': {
+    accepted: boolean
+    iterations: number
+    escalationDepth: number
+    cost: number
+    terminationReason: string
+    finalArtifactId?: string
+  }
+  'evaluation': {
+    decision: string
+    confidence: number
+    issues: string[]
+    missingContext: string[]
+    compressedText: string
+  }
+  'final': {
+    accepted: boolean
+    artifactId?: string
+    summary: string
+    cost: number
+    tokenUsage: { promptTokens: number; completionTokens: number }
+  }
   'decision': { question: string; decision: string; why: string }
   'review': { verdict: 'PASS' | 'ISSUES'; findings: ReviewFinding[] }
   'test-result': { passed: boolean; errors: string[]; output: string }
   'pointer-set': { pointers: string[] }
   'token-estimate': { inputTokens: number; outputTokens: number; expectedSpend: number }
+  'compression': {
+    sourceKind: ArtifactKind | 'context' | 'history' | 'text'
+    originalTokens: number
+    compressedTokens: number
+    savedTokens: number
+    ratio: number
+    text: string
+  }
+  'cost': {
+    promptTokens: number
+    completionTokens: number
+    cumulativeCost: number
+    compressionSavings: number
+    escalationCost: number
+    estimatedRemainingBudget: number
+  }
   'intent': Record<string, unknown>
   'metric': Record<string, unknown>
   'failure': { reason: string; recoverable: boolean }

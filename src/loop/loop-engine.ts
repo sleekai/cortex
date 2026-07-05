@@ -12,11 +12,12 @@
 // evaluated before the Router runs, and no worker calls another worker.
 import { type UCP } from '../packet/ucp.js'
 import { type CodeChunk, type ValidationResult } from '../core/types.js'
-import { type Artifact, isKind } from '../artifact/artifacts.js'
+import { type Artifact, isKind, makeArtifact } from '../artifact/artifacts.js'
 import { type ScoredWorker } from '../capability/planner.js'
 import { dispatchOne, type DispatchOptions, DEFAULT_DISPATCH_OPTIONS } from '../worker/dispatch.js'
 import { applyPatch, runValidationHooks } from '../validator/patch-apply.js'
 import { generateErrorPacket } from '../packet/generator.js'
+import { compressText } from '../runtime/compression.js'
 import {
   type ExecutionState,
   initialState,
@@ -50,6 +51,8 @@ export interface Production {
   // Spend for this attempt in relative cost units (accrued into state.cost).
   cost: number
   latencyMs: number
+  promptTokens?: number
+  completionTokens?: number
   // Deterministic validation of the output, when applicable (patches).
   validation?: ValidationResult
 }
@@ -83,6 +86,7 @@ export interface LoopEngineResult {
   accepted: boolean
   terminationReason: string
   finalOutput: Artifact | null
+  artifacts: Artifact[]
 }
 
 export async function runExecutionLoop(
@@ -100,6 +104,7 @@ export async function runExecutionLoop(
   let issues: string[] = []
   let currentChunks = chunks
   let contextRefreshed = false
+  const artifacts: Artifact[] = []
 
   // Bounded by construction: the Router terminates on ACCEPT/FINISH, on any
   // §6 bound, or on convergence; escalation is capped by both the depth bound
@@ -113,6 +118,15 @@ export async function runExecutionLoop(
       validation: production.validation,
       attempt: state.iteration,
     })
+    const evaluationCompression = compressText([...evaluation.issues, ...(evaluation.missingContext ?? [])].join('\n'), 200)
+    const evaluationArtifact = makeArtifact('evaluation', packet.t, 'evaluator', {
+      decision: evaluation.decision,
+      confidence: evaluation.confidence,
+      issues: evaluation.issues,
+      missingContext: evaluation.missingContext ?? [],
+      compressedText: evaluationCompression.text,
+    })
+    artifacts.push(evaluationArtifact)
 
     state = recordAttempt(state, {
       iteration: state.iteration + 1,
@@ -123,6 +137,8 @@ export async function runExecutionLoop(
       issues: evaluation.issues,
       cost: production.cost,
       latencyMs: production.latencyMs,
+      ...(production.promptTokens !== undefined ? { promptTokens: production.promptTokens } : {}),
+      ...(production.completionTokens !== undefined ? { completionTokens: production.completionTokens } : {}),
     }, production.artifact)
 
     const action = route(state, evaluation, bounds)
@@ -131,14 +147,14 @@ export async function runExecutionLoop(
 
     if (action.action === 'finish') {
       state = finish(state, state.escalationDepth > 0 ? 'escalated' : 'finished')
-      return { state, accepted: action.accepted, terminationReason: action.reason, finalOutput: state.currentOutput }
+      return { state, accepted: action.accepted, terminationReason: action.reason, finalOutput: state.currentOutput, artifacts }
     }
 
     if (action.action === 'escalate') {
       if (rung + 1 >= ladderSize) {
         warn('loop: escalation requested but ladder exhausted — finishing')
         state = finish(state, 'escalated')
-        return { state, accepted: false, terminationReason: 'ladder exhausted (no higher-tier worker)', finalOutput: state.currentOutput }
+        return { state, accepted: false, terminationReason: 'ladder exhausted (no higher-tier worker)', finalOutput: state.currentOutput, artifacts }
       }
       rung++
       state = escalate(state)
@@ -160,7 +176,7 @@ export async function runExecutionLoop(
 
   // Unreachable when the Router honors maxIterations; kept as a hard backstop.
   state = finish(state, state.escalationDepth > 0 ? 'escalated' : 'finished')
-  return { state, accepted: false, terminationReason: 'iteration guard tripped', finalOutput: state.currentOutput }
+  return { state, accepted: false, terminationReason: 'iteration guard tripped', finalOutput: state.currentOutput, artifacts }
 }
 
 // ── Default Producer: dispatch a single ladder rung ───────────────────────
@@ -183,8 +199,11 @@ export function ladderProducer(
     // when the engine fetched context the Evaluator asked for, the retry must
     // carry the full packet so the new chunks actually reach the worker.
     const errorOnlyRetry = ctx.attempt > 0 && ctx.issues.length > 0 && !ctx.contextRefreshed
+    const compressedIssues = errorOnlyRetry
+      ? compressText(ctx.issues.join('\n'), 220).text
+      : ''
     const packet = errorOnlyRetry
-      ? generateErrorPacket(ctx.packet.t, ctx.packet.g, ctx.issues.join('\n').slice(0, 600), ctx.issues[0]!, ctx.attempt)
+      ? generateErrorPacket(ctx.packet.t, ctx.packet.g, compressedIssues, ctx.issues[0]!, ctx.attempt)
       : ctx.packet
     const chunks = errorOnlyRetry ? [] : ctx.chunks
 
@@ -204,6 +223,8 @@ export function ladderProducer(
       tier: scored.worker.tier,
       cost: scored.expectedSpend,
       latencyMs: result.latencyMs,
+      promptTokens: result.estInputTokens,
+      completionTokens: result.estOutputTokens,
       validation,
     }
   }

@@ -78,8 +78,16 @@ export const triageSkill: Skill = {
       entryTier: data.entryTier,
       ambiguity: cts.ambiguity.score,
     })
+    const triageArtifact = makeArtifact('triage', ctx.taskId, 'skill:triage', {
+      normalizedTask: cts.normalized_task,
+      blueprint: data.blueprint,
+      entryTier: data.entryTier,
+      ambiguityScore: cts.ambiguity.score,
+      capabilities: intent.capabilities,
+      confidence: intent.confidence,
+    })
     return {
-      artifacts: [artifact],
+      artifacts: [artifact, triageArtifact],
       observations: observation({
         confidence: intent.confidence,
         recommendedAction: ctx.policies.clarification.shouldClarify(cts.ambiguity.score) ? 'clarify' : 'proceed',
@@ -110,8 +118,13 @@ export const grillingSkill: Skill = {
       questions,
       reason: flags.length > 0 ? `ambiguity flags: ${flags.join(', ')}` : 'task is underspecified',
     })
+    const grillArtifact = makeArtifact('grill', ctx.taskId, 'skill:grilling', {
+      questions,
+      reason: flags.length > 0 ? `ambiguity flags: ${flags.join(', ')}` : 'task is underspecified',
+      ambiguityScore: data?.cts.ambiguity.score ?? 0.5,
+    })
     return {
-      artifacts: [artifact],
+      artifacts: [artifact, grillArtifact],
       observations: observation({
         confidence: data?.cts.ambiguity.score ?? 0.5,
         recommendedAction: ctx.policies.clarification.mode === 'halt' ? 'clarify' : 'proceed',

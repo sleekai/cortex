@@ -49,8 +49,8 @@ test('triage skill emits intent artifact and blueprint recommendation', async ()
   assert.ok(data.cts)
   assert.ok(data.intent)
   assert.equal(data.blueprint, 'debug') // "fix ... bug" routes to debug
-  assert.equal(outcome.artifacts.length, 1)
-  assert.equal(outcome.artifacts[0]!.kind, 'intent')
+  assert.ok(outcome.artifacts.some(a => a.kind === 'intent'))
+  assert.ok(outcome.artifacts.some(a => a.kind === 'triage'))
 })
 
 test('triage skill skips when its data is already on the blackboard', async () => {

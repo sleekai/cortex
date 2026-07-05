@@ -4,7 +4,7 @@ import { type TaskIntent } from '../capability/capabilities.js'
 import { type BudgetResult } from '../packet/budget-controller.js'
 import { type RouterBounds } from '../loop/router.js'
 import { type MetricRecord } from '../state/metrics.js'
-import { type Artifact, isKind } from '../artifact/artifacts.js'
+import { type Artifact, isKind, makeArtifact } from '../artifact/artifacts.js'
 import { type ContextService, defaultContextService } from '../loop/context-service.js'
 import { type ContextPolicy, DEFAULT_POLICIES } from '../policy/policies.js'
 import { runExecutionLoop, ladderProducer, type LoopEngineResult } from '../loop/loop-engine.js'
@@ -29,7 +29,7 @@ export interface ExecuteConfig extends KernelConfig {
 export type TaskOutcome =
   | { kind: 'pointers'; intent: TaskIntent; plan: Plan; pointers: string[] }
   | { kind: 'refused'; intent: TaskIntent; plan: Plan; reason: string }
-  | { kind: 'completed'; intent: TaskIntent; plan: Plan; ucp: UCP; result: LoopEngineResult }
+  | { kind: 'completed'; intent: TaskIntent; plan: Plan; ucp: UCP; result: LoopEngineResult; artifacts: Artifact[] }
 
 interface ExecutePreparedOptions {
   projectRoot: string
@@ -43,7 +43,7 @@ interface ExecutePreparedOptions {
 async function executePrepared(
   prepared: PreparedDispatch & { kind: 'packet'; ucp: UCP; budgeted: BudgetResult },
   opts: ExecutePreparedOptions,
-): Promise<{ loopResult: LoopEngineResult; patch: string }> {
+): Promise<{ loopResult: LoopEngineResult; patch: string; artifacts: Artifact[] }> {
   const producer = ladderProducer(prepared.plan.ladder, opts.projectRoot, {
     timeoutMs: opts.timeoutMs,
     maxOutputBytes: opts.maxOutputBytes,
@@ -55,13 +55,39 @@ async function executePrepared(
     ...(opts.contextService ? { contextService: opts.contextService } : {}),
   })
 
-  if (loopResult.finalOutput) {
-    saveArtifact(opts.projectRoot, loopResult.finalOutput)
+  const historyTokens = loopResult.state.history.reduce((sum, h) => ({
+    prompt: sum.prompt + (h.promptTokens ?? 0),
+    completion: sum.completion + (h.completionTokens ?? 0),
+  }), { prompt: 0, completion: 0 })
+  const executionArtifact = makeArtifact('execution', prepared.ucp.t, 'cuea-loop', {
+    accepted: loopResult.accepted,
+    iterations: loopResult.state.iteration,
+    escalationDepth: loopResult.state.escalationDepth,
+    cost: loopResult.state.cost,
+    terminationReason: loopResult.terminationReason,
+    ...(loopResult.finalOutput ? { finalArtifactId: loopResult.finalOutput.id } : {}),
+  })
+  const finalArtifact = makeArtifact('final', prepared.ucp.t, 'kernel', {
+    accepted: loopResult.accepted,
+    ...(loopResult.finalOutput ? { artifactId: loopResult.finalOutput.id } : {}),
+    summary: loopResult.terminationReason,
+    cost: loopResult.state.cost,
+    tokenUsage: { promptTokens: historyTokens.prompt, completionTokens: historyTokens.completion },
+  })
+  const artifacts = [
+    ...prepared.artifacts,
+    ...loopResult.artifacts,
+    executionArtifact,
+    finalArtifact,
+    ...(loopResult.finalOutput ? [loopResult.finalOutput] : []),
+  ]
+  for (const artifact of artifacts) {
+    saveArtifact(opts.projectRoot, artifact)
   }
   const patch = loopResult.finalOutput && isKind(loopResult.finalOutput, 'patch') ? loopResult.finalOutput.body.diff : ''
   updateState(opts.projectRoot, prepared.ucp.t, patch, prepared.budgeted.chunks, loopResult.state.iteration)
 
-  return { loopResult, patch }
+  return { loopResult, patch, artifacts }
 }
 
 export { executePrepared }
@@ -102,7 +128,7 @@ export async function executeTask(task: string, config: ExecuteConfig): Promise<
   )
 
   info('starting CUEA execution loop...')
-  const { loopResult } = await executePrepared(prepared, {
+  const { loopResult, artifacts } = await executePrepared(prepared, {
     projectRoot: config.projectRoot,
     timeoutMs: config.timeoutMs ?? 180_000,
     maxOutputBytes: config.maxOutputBytes ?? 10 * 1024 * 1024,
@@ -110,7 +136,7 @@ export async function executeTask(task: string, config: ExecuteConfig): Promise<
     contextService,
     onMetric: (record) => appendMetric(config.projectRoot, record),
   })
-  return { kind: 'completed', intent: prepared.intent, plan: prepared.plan, ucp: prepared.ucp, result: loopResult }
+  return { kind: 'completed', intent: prepared.intent, plan: prepared.plan, ucp: prepared.ucp, result: loopResult, artifacts }
 }
 
 // Deprecated aliases, kept for callers of the pre-collapse API. runTask and

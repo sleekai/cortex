@@ -19,6 +19,8 @@ import { type UCP } from '../packet/ucp.js'
 import { loadState } from '../state/store.js'
 import { reliabilityOverrides } from '../state/metrics.js'
 import { info, warn } from '../core/logger.js'
+import { makeArtifact, type Artifact } from '../artifact/artifacts.js'
+import { compressChunks, makeCompressionArtifact } from '../runtime/compression.js'
 
 export interface KernelConfig {
   projectRoot: string
@@ -56,9 +58,9 @@ export function planTask(
 }
 
 export type PreparedDispatch =
-  | { kind: 'pointers'; intent: TaskIntent; plan: Plan; context: CompiledContext; pointers: string[] }
-  | { kind: 'refused'; intent: TaskIntent; plan: Plan; context: CompiledContext; reason: string }
-  | { kind: 'packet'; intent: TaskIntent; plan: Plan; context: CompiledContext; ucp: UCP; budgeted: BudgetResult }
+  | { kind: 'pointers'; intent: TaskIntent; plan: Plan; context: CompiledContext; pointers: string[]; artifacts: Artifact[] }
+  | { kind: 'refused'; intent: TaskIntent; plan: Plan; context: CompiledContext; reason: string; artifacts: Artifact[] }
+  | { kind: 'packet'; intent: TaskIntent; plan: Plan; context: CompiledContext; ucp: UCP; budgeted: BudgetResult; artifacts: Artifact[] }
 
 export function prepareDispatch(task: string, config: KernelConfig, tierHint?: string): PreparedDispatch {
   const budget = config.budget ?? DEFAULT_BUDGET
@@ -74,28 +76,77 @@ export function prepareDispatch(task: string, config: KernelConfig, tierHint?: s
   }
 
   if (plan.tier0 || intent.taskType === 'locate') {
-    return { kind: 'pointers', intent, plan, context, pointers: context.pointers }
+    const taskId = `plan-${Buffer.from(task).toString('base64url').slice(0, 8)}`
+    const compressed = compressChunks(context.chunks, 300)
+    return {
+      kind: 'pointers',
+      intent,
+      plan,
+      context,
+      pointers: context.pointers,
+      artifacts: [
+        makeArtifact('context', taskId, 'context-compiler', {
+          level: context.level,
+          pointers: context.pointers,
+          chunkCount: context.chunks.length,
+          estimatedTokens: context.estTokens,
+          compressedText: compressed.text,
+        }),
+        makeCompressionArtifact(taskId, 'context', compressed),
+      ],
+    }
   }
 
   if (plan.ladder.length === 0) {
     const reason = plan.excluded.length > 0
       ? plan.excluded[0]!.reason
       : 'no feasible workers for this intent'
-    return { kind: 'refused', intent, plan, context, reason }
+    return { kind: 'refused', intent, plan, context, reason, artifacts: [] }
   }
 
   const previousFacts = loadState(config.projectRoot).distilledFacts
   const ucp = generateWorkPacket(task, context.chunks, previousFacts)
+  const contextCompression = compressChunks(context.chunks, 300)
+  const planArtifact = makeArtifact('plan', ucp.t, 'capability-planner', {
+    steps: plan.ladder.map((w, i) => `${i + 1}. ${w.worker.id} tier=${w.worker.tier} ${w.justification}`),
+    workerLadder: plan.ladder.map(w => w.worker.id),
+    entryTier: plan.entryTier,
+    expectedSpend: plan.ladder.reduce((sum, w) => sum + w.expectedSpend, 0),
+  })
+  const contextArtifact = makeArtifact('context', ucp.t, 'context-compiler', {
+    level: context.level,
+    pointers: context.pointers,
+    chunkCount: context.chunks.length,
+    estimatedTokens: context.estTokens,
+    compressedText: contextCompression.text,
+  })
   const spendContext = { cost: plan.ladder[0]!.worker.cost }
   const budgeted = enforceBudget(ucp, context.chunks, budget, spendContext)
+  const artifacts: Artifact[] = [
+    planArtifact,
+    contextArtifact,
+    makeCompressionArtifact(ucp.t, 'context', contextCompression),
+  ]
+  if (budgeted.spend) {
+    artifacts.push(makeArtifact('cost', ucp.t, 'cost-engine', {
+      promptTokens: budgeted.spend.inputTokens,
+      completionTokens: budgeted.spend.outputTokens,
+      cumulativeCost: budgeted.spend.expectedSpend,
+      compressionSavings: contextCompression.savedTokens,
+      escalationCost: 0,
+      estimatedRemainingBudget: Number.isFinite(budget.maxSpend)
+        ? Math.max(0, budget.maxSpend - budgeted.spend.expectedSpend)
+        : Number.POSITIVE_INFINITY,
+    }))
+  }
 
   if (budgeted.refused) {
-    return { kind: 'refused', intent, plan, context, reason: budgeted.refusedReason ?? 'budget refused dispatch' }
+    return { kind: 'refused', intent, plan, context, reason: budgeted.refusedReason ?? 'budget refused dispatch', artifacts }
   }
   if (budgeted.exceeded) {
     warn(`budget exceeded (${budgeted.totalTokens} > ${budget.maxInputTokens}) — reduced context`)
   }
-  return { kind: 'packet', intent, plan, context, ucp: budgeted.ucp, budgeted }
+  return { kind: 'packet', intent, plan, context, ucp: budgeted.ucp, budgeted, artifacts }
 }
 
 export function runLocate(task: string, projectRoot: string, goal?: string): string[] {
