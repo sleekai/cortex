@@ -23,7 +23,7 @@ side-effect import — ship a module that calls `register*` at load time.
 | Execution skill | `src/skill/registry.ts` | `registerSkill(skill)` |
 | Blueprint | `src/blueprint/blueprint.ts` | `registerBlueprint(bp)` |
 | Policy set | `src/policy/policies.ts` | `registerPolicySet(set)` |
-| Triage (CTS) stage | `src/triage/registry.ts` | `registerSkill(stage)` (type `TriageStage`) |
+| Triage (CTS) stage | `src/triage/registry.ts` | `registerStage(stage)` (type `TriageStage`) |
 | Worker | `.cortex/workers.json` overlay | JSON, no code |
 | Harness | `src/harness/harness.ts` | `registerHarnessFactory(kind, fn)` |
 | Evaluator | `loop/loop-engine.ts` options | `{ evaluator }` per run |
@@ -149,7 +149,7 @@ registerPolicySet({
 ```
 
 Router bounds are a projection of the policy set (`boundsFromPolicies`) —
-the Router itself stays pure and policy-free. `capability/policy.ts` (worker
+the Router itself stays pure and policy-free. `capability/constraints.ts` (worker
 deny-lists, write access) is a separate, complementary layer: it defines the
 *feasible worker set*; spend gates live in `core/types.ts` `BudgetConfig` and
 the `PolicySet.budget` policy.

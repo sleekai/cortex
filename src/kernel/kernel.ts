@@ -8,7 +8,7 @@ import { DEFAULT_BUDGET, type BudgetConfig } from '../core/types.js'
 import { type TaskIntent } from '../capability/capabilities.js'
 import { compileIntent } from '../capability/intent-compiler.js'
 import { planDispatch, type Plan } from '../capability/planner.js'
-import { DEFAULT_POLICY, type Policy } from '../capability/policy.js'
+import { DEFAULT_CONSTRAINTS, type PlannerConstraints } from '../capability/constraints.js'
 import { loadRegistry, type WorkerSpec } from '../worker/registry.js'
 import { createHarness } from '../harness/harness.js'
 import { readMetrics, aggregateStats } from '../state/metrics.js'
@@ -24,7 +24,7 @@ export interface KernelConfig {
   projectRoot: string
   goal?: string
   budget?: BudgetConfig
-  policy?: Policy
+  constraints?: PlannerConstraints
   timeoutMs?: number
   maxOutputBytes?: number
   // Opt-in CTS seam: when true, the triage pipeline runs once inside the
@@ -42,7 +42,7 @@ export interface PlannedTask {
 export function planTask(
   task: string,
   projectRoot: string,
-  policy: Policy = DEFAULT_POLICY,
+  constraints: PlannerConstraints = DEFAULT_CONSTRAINTS,
   retryProbability: number = DEFAULT_BUDGET.retryProbability,
   tierHint?: string,
   maxSpend: number = DEFAULT_BUDGET.maxSpend,
@@ -51,7 +51,7 @@ export function planTask(
   const registry = loadRegistry(projectRoot)
   const priors = new Map(registry.workers.map(w => [w.id, w.reliability]))
   const overrides = reliabilityOverrides(projectRoot, priors)
-  const plan = planDispatch(intent, registry, policy, overrides, retryProbability, tierHint, maxSpend)
+  const plan = planDispatch(intent, registry, constraints, overrides, retryProbability, tierHint, maxSpend)
   return { intent, plan }
 }
 
@@ -62,10 +62,10 @@ export type PreparedDispatch =
 
 export function prepareDispatch(task: string, config: KernelConfig, tierHint?: string): PreparedDispatch {
   const budget = config.budget ?? DEFAULT_BUDGET
-  const policy = config.policy ?? DEFAULT_POLICY
+  const constraints = config.constraints ?? DEFAULT_CONSTRAINTS
   const goal = config.goal ?? task
 
-  const { intent, plan } = planTask(task, config.projectRoot, policy, budget.retryProbability, tierHint, budget.maxSpend)
+  const { intent, plan } = planTask(task, config.projectRoot, constraints, budget.retryProbability, tierHint, budget.maxSpend)
   info(`intent: ${intent.taskType}/${intent.complexity} conf=${intent.confidence.toFixed(2)} caps=${intent.capabilities.join('+')}`)
 
   const context = compileContext(config.projectRoot, goal, intent, budget)

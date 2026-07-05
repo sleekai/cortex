@@ -1,9 +1,9 @@
 import { test } from 'node:test'
 import * as assert from 'node:assert/strict'
-import { routingSkill } from '../src/triage/skills/routing.js'
+import { routingStage } from '../src/triage/stages/routing.js'
 import { emptyPacket, ALL_TIERS } from '../src/triage/packet.js'
 import { type UCP } from '../src/packet/ucp.js'
-import { DEFAULT_TRIAGE_POLICY, type TriageContext } from '../src/triage/skill.js'
+import { DEFAULT_TRIAGE_POLICY, type TriageContext } from '../src/triage/stage.js'
 
 function ctx(normalized: string, score = 1): TriageContext {
   const ucp: UCP = { v: 2, t: 't1', act: 'work', g: normalized, c: [], ctx: { f: [], d: [] }, r: { out: 'patch', format: 'text' } }
@@ -14,7 +14,7 @@ function ctx(normalized: string, score = 1): TriageContext {
 }
 
 function rec(...args: Parameters<typeof ctx>): string {
-  return routingSkill.execute(ctx(...args)).patch.worker_recommendation!
+  return routingStage.execute(ctx(...args)).patch.worker_recommendation!
 }
 
 test('recommendation is always a valid tier', () => {

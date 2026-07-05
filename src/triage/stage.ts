@@ -1,9 +1,9 @@
-// The CTS_Skill contract — a reusable, stateless cognitive module. Each skill
-// patches one slice of the draft CTSPacket. Skills are composable (spec §8):
-// downstream skills read upstream results off the shared draft, so routing
-// can see the normalized task and ambiguity score.
+// The TriageStage contract — a reusable, stateless cognitive module. Each
+// stage patches one slice of the draft CTSPacket. Stages are composable
+// (spec §8): downstream stages read upstream results off the shared draft,
+// so routing can see the normalized task and ambiguity score.
 //
-// Skills MUST NOT: call other Cortex layers (planner/scheduler/workers),
+// Stages MUST NOT: call other Cortex layers (planner/scheduler/workers),
 // execute tools, fetch context, or call an LLM. Built-ins are deterministic.
 //
 // Deviation from the spec's literal `execute(input: UCPPacket)`: composability
@@ -12,10 +12,10 @@
 import { type UCP } from '../packet/ucp.js'
 import { type CTSPacket } from './packet.js'
 
-// Per-policy enable/disable (spec §13). A disabled skill is skipped by the
-// pipeline; its stage's slice keeps the draft default.
+// Per-policy enable/disable (spec §13). A disabled stage is skipped by the
+// pipeline; its slice keeps the draft default.
 export interface TriagePolicy {
-  disabledSkills?: string[]
+  disabledStages?: string[]
 }
 
 export const DEFAULT_TRIAGE_POLICY: TriagePolicy = {}
@@ -23,13 +23,13 @@ export const DEFAULT_TRIAGE_POLICY: TriagePolicy = {}
 export interface TriageContext {
   ucp: UCP // the ingress-normalized packet (source of goal + constraints)
   raw: string // original raw content, before any normalization
-  draft: CTSPacket // accumulating packet: whatever upstream skills have produced
+  draft: CTSPacket // accumulating packet: whatever upstream stages have produced
   policy: TriagePolicy
 }
 
-// A skill returns a shallow patch merged into the draft, plus optional notes
+// A stage returns a shallow patch merged into the draft, plus optional notes
 // (diagnostics only — never surfaced downstream).
-export interface SkillResult {
+export interface StageResult {
   patch: Partial<CTSPacket>
   notes?: string[]
 }
@@ -43,5 +43,5 @@ export interface TriageStage {
   output_schema: object
   cost_level: 'low' | 'medium'
   deterministic: boolean
-  execute(ctx: TriageContext): SkillResult
+  execute(ctx: TriageContext): StageResult
 }

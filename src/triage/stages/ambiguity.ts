@@ -1,7 +1,7 @@
 // Ambiguity Analyzer (spec §4.3). Flags missing/unclear/underspecified/
 // conflicting signals before expensive execution and emits one clarification
 // question per flag. Deterministic; score is 1 (fully clear) minus penalties.
-import { type TriageStage } from '../skill.js'
+import { type TriageStage } from '../stage.js'
 import {
   PATCH_VERBS, VAGUE_SIGNALS, CONFLICT_SIGNALS, extractFileTokens, extractIdentifiers, wordCount,
 } from '../signals.js'
@@ -12,7 +12,7 @@ interface Signal {
   penalty: number
 }
 
-export const ambiguitySkill: TriageStage = {
+export const ambiguityStage: TriageStage = {
   name: 'ambiguity',
   purpose: 'Detect missing requirements, vague terms, underspecification, and conflicts.',
   input_schema: { normalized_task: 'string' },

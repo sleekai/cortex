@@ -5,7 +5,7 @@
 // rung is exhausted or the intent itself demands deep reasoning.
 import { type TaskIntent, type Complexity } from './capabilities.js'
 import { type WorkerSpec, type WorkerRegistry, type WorkerTier } from '../worker/registry.js'
-import { type Policy, DEFAULT_POLICY, checkPolicy } from './policy.js'
+import { type PlannerConstraints, DEFAULT_CONSTRAINTS, checkConstraints } from './constraints.js'
 import { estimateSpend } from '../packet/budget-controller.js'
 
 export interface ScoredWorker {
@@ -71,7 +71,7 @@ export function scoreWorker(
 export function planDispatch(
   intent: TaskIntent,
   registry: WorkerRegistry,
-  policy: Policy = DEFAULT_POLICY,
+  constraints: PlannerConstraints = DEFAULT_CONSTRAINTS,
   reliabilityOverrides: ReliabilityOverrides = new Map(),
   retryProbability = 0.25,
   tierHint?: string,
@@ -101,7 +101,7 @@ export function planDispatch(
   const feasible: WorkerSpec[] = []
 
   for (const worker of registry.withCapabilities(intent.capabilities)) {
-    const verdict = checkPolicy(worker, intent, policy)
+    const verdict = checkConstraints(worker, intent, constraints)
     if (!verdict.allowed) {
       excluded.push({ workerId: worker.id, reason: verdict.reason ?? 'policy' })
       continue

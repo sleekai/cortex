@@ -18,7 +18,7 @@ import { normalizeInput as ingressNormalize } from './ingress/ingress.js'
 import { renderPlanSummary, renderPointerList } from './egress/egress.js'
 import { isKind } from './artifact/artifacts.js'
 // Triage Skill System (CTS) — opt-in per-call via the `triage` argument.
-import './triage/skills/builtins.js'
+import './triage/stages/builtins.js'
 import { runTriage } from './triage/pipeline.js'
 
 const server = new McpServer({

@@ -12,7 +12,7 @@ import { appendMetric } from '../state/metrics.js'
 import { saveArtifact } from '../state/store.js'
 import { info } from '../core/logger.js'
 import { planTask, prepareDispatch, type KernelConfig } from './kernel.js'
-import { DEFAULT_POLICY } from '../capability/policy.js'
+import { DEFAULT_CONSTRAINTS } from '../capability/constraints.js'
 import { defaultContextService } from '../loop/context-service.js'
 import { executePrepared } from './dispatch-orchestrator.js'
 // Side-effect imports: register built-in execution skills and blueprints.
@@ -55,7 +55,7 @@ export async function runBlueprint(task: string, config: BlueprintConfig): Promi
 
   const dispatch: SkillDispatch = async (packet, chunks) => {
     const budget = config.budget ?? DEFAULT_BUDGET
-    const { plan } = planTask(task, config.projectRoot, config.policy ?? DEFAULT_POLICY, budget.retryProbability, data.cts.worker_recommendation, budget.maxSpend)
+    const { plan } = planTask(task, config.projectRoot, config.constraints ?? DEFAULT_CONSTRAINTS, budget.retryProbability, data.cts.worker_recommendation, budget.maxSpend)
     const worker = plan.ladder[0]
     if (!worker) return makeArtifact('failure', packet.t, 'kernel', { reason: 'no feasible worker for this intent', recoverable: false })
     const result = await dispatchOne(packet, chunks, worker, {

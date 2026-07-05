@@ -90,7 +90,7 @@ cortex   (package: @sleekai/cortex)
       capabilities.ts   Capability vocabulary + TaskIntent types
       intent-compiler.ts  deterministic request → structured intent
       planner.ts        expected-utility worker selection + escalation ladder
-      policy.ts         hard constraints (write-access, deny-lists only)
+      constraints.ts    hard planner constraints (write-access, deny-lists only)
     worker/
       registry.ts       WorkerSpec registry: load, validate, query by capability
       registry.default.json   built-in workers (claude CLI as the first entry)
@@ -228,10 +228,11 @@ EU(worker) = quality(worker, caps) × reliability(worker)
 
 subject to: capability coverage, context-window fit, `writeAccess` policy,
 spend caps (from `BudgetConfig.maxSpend`, consolidated into `policies.ts` via
-`PolicySet.budget.maxCost`), tier ≥ ladder entry point. `Policy` in
-`capability/policy.ts` now handles only worker deny-lists and write access
-enforcement — spend limits moved to `BudgetConfig` in `core/types.ts` and
-passed directly to the planner. The **ladder** is: tier 0 deterministic
+`PolicySet.budget.maxCost`), tier ≥ ladder entry point. `PlannerConstraints`
+in `capability/constraints.ts` (renamed from `Policy` — "policy" now refers
+solely to the execution-lifecycle `PolicySet`) handles only worker deny-lists
+and write access enforcement — spend limits moved to `BudgetConfig` in
+`core/types.ts` and passed directly to the planner. The **ladder** is: tier 0 deterministic
 (retrieval/AST — answers `locate`-shaped intents with zero model calls) →
 tier 1 small/local → tier 2 mid → tier 3 premium reasoning. Entry point comes
 from `TaskIntent.complexity`; escalation to the next rung happens only on
@@ -414,6 +415,20 @@ Each phase compiles and tests green before the next begins.
   first write; old file left in place, read-only.
 - v1 packets accepted on input paths; all emitted packets are v2.
 - `$UCP_TOOLCHAIN_DIR` still honored (alias of `$CORTEX_DIR`).
+
+Library-level renames (2026-07, breaking for importers; CLI/MCP unchanged):
+
+- `capability/policy.ts` → `capability/constraints.ts`: `Policy` →
+  `PlannerConstraints`, `DEFAULT_POLICY` → `DEFAULT_CONSTRAINTS`,
+  `checkPolicy` → `checkConstraints`; `KernelConfig.policy` →
+  `KernelConfig.constraints`. "Policy" now refers solely to the
+  execution-lifecycle `PolicySet` (`policy/policies.ts`).
+- Triage vocabulary: `triage/skill.ts` → `triage/stage.ts`,
+  `triage/skills/` → `triage/stages/`; `registerSkill`/`getSkill`/
+  `registeredSkills` (triage registry) → `registerStage`/`getStage`/
+  `registeredStages`; `TriagePolicy.disabledSkills` → `disabledStages`.
+  "Skill" now refers solely to the execution unit (`skill/skill.ts`).
+- `runTask`/`runLoop` → `executeTask` (deprecated aliases retained).
 
 ## Tradeoffs accepted
 

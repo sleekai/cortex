@@ -1,6 +1,6 @@
 // Routing Advisor (spec §4.5). Recommends a worker tier T0–T4. This is a HINT
 // for the scheduler, not a selection — CTS never picks a worker or dispatches.
-import { type TriageStage } from '../skill.js'
+import { type TriageStage } from '../stage.js'
 import { type CtsTier } from '../packet.js'
 import { complexityOf, extractFileTokens, splitClauses, HUMAN_SIGNALS, LOCATE_VERBS, PATCH_VERBS } from '../signals.js'
 
@@ -11,7 +11,7 @@ function bump(tier: CtsTier, by: number): CtsTier {
   return ORDER[idx]!
 }
 
-export const routingSkill: TriageStage = {
+export const routingStage: TriageStage = {
   name: 'routing',
   purpose: 'Recommend a worker tier hint (T0–T4) for the scheduler.',
   input_schema: { normalized_task: 'string', ambiguity: 'CtsAmbiguity' },

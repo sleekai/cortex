@@ -1,26 +1,26 @@
-// Skill registry — the pluggability seam (spec §13). New skills register here
-// without touching the pipeline; policy toggles them on/off per run. Mirrors
-// the kind-keyed Map + register*/get* pattern used by ingress adapters
-// (ingress/ingress.ts:57) and egress renderers.
+// Stage registry — the pluggability seam (spec §13). New triage stages
+// register here without touching the pipeline; policy toggles them on/off
+// per run. Distinct from the execution-Skill registry (skill/registry.ts):
+// a TriageStage is a stage inside the triage pipeline, not an execution unit.
 import { namedRegistry } from '../core/registry.js'
-import { type TriageStage, type TriagePolicy } from './skill.js'
+import { type TriageStage, type TriagePolicy } from './stage.js'
 
 const { register, get, all, clear } = namedRegistry<TriageStage>()
 
-export { register as registerSkill, get as getSkill }
+export { register as registerStage, get as getStage }
 
-export function registeredSkills(): TriageStage[] {
+export function registeredStages(): TriageStage[] {
   return all()
 }
 
-// Skills the given policy leaves enabled. Order is not meaningful here — the
+// Stages the given policy leaves enabled. Order is not meaningful here — the
 // pipeline imposes stage order; this only filters.
-export function enabledSkills(policy: TriagePolicy): TriageStage[] {
-  const disabled = new Set(policy.disabledSkills ?? [])
-  return registeredSkills().filter(s => !disabled.has(s.name))
+export function enabledStages(policy: TriagePolicy): TriageStage[] {
+  const disabled = new Set(policy.disabledStages ?? [])
+  return registeredStages().filter(s => !disabled.has(s.name))
 }
 
 // Test/isolation hook — the pipeline never calls this in production.
-export function clearSkills(): void {
+export function clearStages(): void {
   clear()
 }

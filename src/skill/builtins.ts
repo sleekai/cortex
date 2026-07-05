@@ -1,5 +1,5 @@
 // Built-in execution skills (MVP §1, §8, §9). Side-effect module: importing
-// it registers the four built-ins, mirroring triage/skills/builtins.ts and
+// it registers the four built-ins, mirroring triage/stages/builtins.ts (stage registry) and
 // the harness factory imports at src/index.ts:9-10.
 //
 //   triage     classify task, estimate complexity, recommend blueprint + tier
@@ -17,7 +17,7 @@ import { compileIntent } from '../capability/intent-compiler.js'
 import { normalizeInput } from '../ingress/ingress.js'
 import { runTriage } from '../triage/pipeline.js'
 import { type CTSPacket } from '../triage/packet.js'
-import '../triage/skills/builtins.js'
+import '../triage/stages/builtins.js'
 import { registerSkill } from './registry.js'
 import { type Skill, type SkillContext, observation } from './skill.js'
 

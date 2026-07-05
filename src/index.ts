@@ -29,7 +29,7 @@ import { renderDispatchSummary, renderLoopSummary, renderPlanSummary, renderPoin
 // Triage Skill System (CTS) — opt-in pre-execution cognitive filter. The
 // side-effect import registers the built-in skills; runTriage is only called
 // when --triage / CORTEX_TRIAGE is set, so the pipeline is inert by default.
-import './triage/skills/builtins.js'
+import './triage/stages/builtins.js'
 import { runTriage } from './triage/pipeline.js'
 import * as fs from 'node:fs'
 import * as path from 'node:path'

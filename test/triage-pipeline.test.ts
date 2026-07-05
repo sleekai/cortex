@@ -1,9 +1,9 @@
 import { test } from 'node:test'
 import * as assert from 'node:assert/strict'
 // Side-effect: register the built-in skills.
-import '../src/triage/skills/builtins.js'
+import '../src/triage/stages/builtins.js'
 import { runTriage, STAGE_ORDER } from '../src/triage/pipeline.js'
-import { registeredSkills } from '../src/triage/registry.js'
+import { registeredStages } from '../src/triage/registry.js'
 import { validateCtsPacket } from '../src/triage/packet.js'
 import { type UCP } from '../src/packet/ucp.js'
 
@@ -13,7 +13,7 @@ function input(content: string): { ucp: UCP; raw: string } {
 }
 
 test('all built-in skills are registered', () => {
-  const names = registeredSkills().map(s => s.name).sort()
+  const names = registeredStages().map(s => s.name).sort()
   assert.deepEqual(names, [...STAGE_ORDER].sort())
 })
 
@@ -30,7 +30,7 @@ test('runTriage is deterministic across runs', () => {
 })
 
 test('policy can disable a skill (ambiguity)', () => {
-  const p = runTriage(input('fix it'), { disabledSkills: ['ambiguity'] })
+  const p = runTriage(input('fix it'), { disabledStages: ['ambiguity'] })
   // ambiguity stage skipped → draft keeps the clean default (score 1, no flags)
   assert.equal(p.ambiguity.score, 1)
   assert.deepEqual(p.ambiguity.flags, [])
