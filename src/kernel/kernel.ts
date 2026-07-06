@@ -6,21 +6,21 @@
 //   prepareDispatch  + context + packet + budget verdict   (read-only)
 import { DEFAULT_BUDGET, type BudgetConfig } from '../core/types.js'
 import { type TaskIntent } from '../capability/capabilities.js'
-import { compileIntent } from '../capability/intent-compiler.js'
 import { planDispatch, type Plan } from '../capability/planner.js'
 import { DEFAULT_CONSTRAINTS, type PlannerConstraints } from '../capability/constraints.js'
 import { loadRegistry, type WorkerSpec } from '../worker/registry.js'
 import { createHarness } from '../harness/harness.js'
 import { readMetrics, aggregateStats } from '../state/metrics.js'
-import { compileContext, type CompiledContext } from '../retrieval/context-compiler.js'
+import { type CompiledContext } from '../retrieval/context-compiler.js'
 import { generateWorkPacket } from '../packet/generator.js'
 import { enforceBudget, type BudgetResult } from '../packet/budget-controller.js'
 import { type UCP } from '../packet/ucp.js'
 import { loadState } from '../state/store.js'
 import { reliabilityOverrides } from '../state/metrics.js'
 import { info, warn } from '../core/logger.js'
-import { makeArtifact, type Artifact } from '../artifact/artifacts.js'
+import { type Artifact } from '../artifact/artifacts.js'
 import { compressChunks, makeCompressionArtifact } from '../runtime/compression.js'
+import { getCompilerRuntime, type CompilerRuntime } from '../compiler/runtime.js'
 
 export interface KernelConfig {
   projectRoot: string
@@ -34,6 +34,8 @@ export interface KernelConfig {
   // absent, triage never runs and planning sees the raw task (pre-CTS
   // behaviour).
   triage?: boolean
+  // Injected CompilerRuntime (defaults to the global runtime).
+  compilerRuntime?: CompilerRuntime
 }
 
 export interface PlannedTask {
@@ -48,7 +50,9 @@ export function planTask(
   retryProbability: number = DEFAULT_BUDGET.retryProbability,
   tierHint?: string,
   maxSpend: number = DEFAULT_BUDGET.maxSpend,
+  runtime?: CompilerRuntime,
 ): PlannedTask {
+  const { compileIntent } = runtime ?? getCompilerRuntime()
   const intent = compileIntent(task)
   const registry = loadRegistry(projectRoot)
   const priors = new Map(registry.workers.map(w => [w.id, w.reliability]))
@@ -63,11 +67,13 @@ export type PreparedDispatch =
   | { kind: 'packet'; intent: TaskIntent; plan: Plan; context: CompiledContext; ucp: UCP; budgeted: BudgetResult; artifacts: Artifact[] }
 
 export function prepareDispatch(task: string, config: KernelConfig, tierHint?: string): PreparedDispatch {
+  const runtime = config.compilerRuntime ?? getCompilerRuntime()
+  const { compileContext, makeArtifact } = runtime
   const budget = config.budget ?? DEFAULT_BUDGET
   const constraints = config.constraints ?? DEFAULT_CONSTRAINTS
   const goal = config.goal ?? task
 
-  const { intent, plan } = planTask(task, config.projectRoot, constraints, budget.retryProbability, tierHint, budget.maxSpend)
+  const { intent, plan } = planTask(task, config.projectRoot, constraints, budget.retryProbability, tierHint, budget.maxSpend, runtime)
   info(`intent: ${intent.taskType}/${intent.complexity} conf=${intent.confidence.toFixed(2)} caps=${intent.capabilities.join('+')}`)
 
   const context = compileContext(config.projectRoot, goal, intent, budget)
@@ -149,7 +155,8 @@ export function prepareDispatch(task: string, config: KernelConfig, tierHint?: s
   return { kind: 'packet', intent, plan, context, ucp: budgeted.ucp, budgeted, artifacts }
 }
 
-export function runLocate(task: string, projectRoot: string, goal?: string): string[] {
+export function runLocate(task: string, projectRoot: string, goal?: string, runtime?: CompilerRuntime): string[] {
+  const { compileIntent, compileContext } = runtime ?? getCompilerRuntime()
   const intent = { ...compileIntent(task), taskType: 'locate' as const }
   const context = compileContext(projectRoot, goal ?? task, intent, DEFAULT_BUDGET)
   return context.pointers

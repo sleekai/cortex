@@ -13,13 +13,13 @@ import { makeArtifact, isKind } from '../artifact/artifacts.js'
 import { type UCP, type PacketOut } from '../packet/ucp.js'
 import { generateJudgmentPacket } from '../packet/generator.js'
 import { type TaskIntent } from '../capability/capabilities.js'
-import { compileIntent } from '../capability/intent-compiler.js'
 import { normalizeInput } from '../ingress/ingress.js'
 import { runTriage } from '../triage/pipeline.js'
 import { type CTSPacket } from '../triage/packet.js'
 import '../triage/stages/builtins.js'
 import { registerSkill } from './registry.js'
 import { type Skill, type SkillContext, observation } from './skill.js'
+import { getCompilerRuntime } from '../compiler/runtime.js'
 
 // The blackboard slice the triage skill publishes — downstream skills and the
 // kernel's blueprint selection read this shape from blackboard['triage'].
@@ -60,6 +60,7 @@ export const triageSkill: Skill = {
     return triageData(ctx) === undefined
   },
   execute(ctx) {
+    const { compileIntent } = getCompilerRuntime()
     const cts = runTriage({ ucp: contextUcp(ctx), raw: ctx.raw || ctx.task })
     const intent = compileIntent(cts.normalized_task)
     const data: TriageData = {
