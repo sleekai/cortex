@@ -76,7 +76,10 @@ export interface SkillOutcome {
 // The LLM seam: dispatch one packet through the planned worker ladder and get
 // the parsed artifact back. Injected by the runner so skills stay decoupled
 // from the worker/harness layers; absent in deterministic-only runs.
-export type SkillDispatch = (packet: UCP, chunks: CodeChunk[]) => Promise<Artifact>
+// An optional CapabilityProfile performs per-skill resolution instead of
+// inheriting the producer's plan — judgment skills use this to resolve
+// against their own requirements (Phase 3).
+export type SkillDispatch = (packet: UCP, chunks: CodeChunk[], profile?: CapabilityProfile) => Promise<Artifact>
 
 export interface SkillContext {
   taskId: string

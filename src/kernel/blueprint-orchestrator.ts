@@ -1,19 +1,21 @@
 import { DEFAULT_BUDGET, type BudgetConfig } from '../core/types.js'
 import { type Artifact, isKind } from '../artifact/artifacts.js'
 import { type CodeChunk } from '../core/types.js'
-import { type SkillContext, type SkillDispatch } from '../skill/skill.js'
+import { type CapabilityProfile, type SkillContext, type SkillDispatch } from '../skill/skill.js'
 import { DEFAULT_COMPILER_RUNTIME } from '../compiler/runtime.js'
 import { triageSkill, type TriageData } from '../skill/builtins.js'
 import { getBlueprint } from '../blueprint/blueprint.js'
 import { executeBlueprint, type BlueprintOutcome as RunnerOutcome, type ExecutedStep, type ProduceResult } from '../blueprint/runner.js'
 import { type PolicySet, DEFAULT_POLICIES, mergePolicies, boundsFromPolicies } from '../policy/policies.js'
+import { loadRegistry } from '../worker/registry.js'
 import { dispatchOne } from '../worker/dispatch.js'
 import { normalizeInput } from '../ingress/ingress.js'
 import { appendMetric } from '../state/metrics.js'
 import { saveArtifact } from '../state/store.js'
-import { info } from '../core/logger.js'
+import { info, debug } from '../core/logger.js'
 import { planTask, prepareDispatch, type KernelConfig } from './kernel.js'
 import { DEFAULT_CONSTRAINTS } from '../capability/constraints.js'
+import { DefaultResolver, type CapabilityResolver } from '../capability/resolver.js'
 import { defaultContextService } from '../loop/context-service.js'
 import { executePrepared } from './dispatch-orchestrator.js'
 // Side-effect imports: register built-in execution skills and blueprints.
@@ -57,10 +59,40 @@ export async function runBlueprint(task: string, config: BlueprintConfig): Promi
   const policies = mergePolicies(basePolicies, blueprint.policies)
   info(`blueprint: ${blueprint.name} (recommended: ${data.blueprint}) policies=${policies.name}`)
 
-  const dispatch: SkillDispatch = async (packet, chunks) => {
+  const resolver: CapabilityResolver = new DefaultResolver()
+
+  const dispatch: SkillDispatch = async (packet, chunks, profile?) => {
     const { makeArtifact } = runtime
-    const budget = config.budget ?? DEFAULT_BUDGET
-    const { plan } = planTask(task, config.projectRoot, config.constraints ?? DEFAULT_CONSTRAINTS, budget.retryProbability, data.cts.worker_recommendation, budget.maxSpend)
+
+    if (profile) {
+      // Per-skill resolution: resolve workers against the skill's own profile
+      // instead of inheriting the task's plan. This lets judgment skills
+      // (summarize, review) select workers optimized for their requirements.
+      const capabilities = profile.minimum.map(r => r.capability)
+      const budget = config.budget ?? DEFAULT_BUDGET
+      const constraints = config.constraints ?? DEFAULT_CONSTRAINTS
+      const resolution = resolver.resolve({
+        capabilities: capabilities.length > 0 ? capabilities : ['reasoning'],
+        profile,
+        estTokenBudget: budget.maxInputTokens * 10,
+        retryProbability: budget.retryProbability,
+      }, loadRegistry(config.projectRoot), constraints)
+      const worker = resolution.ladder[0]
+      if (!worker) {
+        debug(`skill dispatch: no feasible worker for profile ${JSON.stringify(profile)} — ${resolution.excluded.map(e => e.reason).join('; ')}`)
+        return makeArtifact('failure', packet.t, 'kernel', { reason: 'no feasible worker for this skill profile', recoverable: false })
+      }
+      const result = await dispatchOne(packet, chunks, worker, {
+        timeoutMs: config.timeoutMs ?? policies.timeout.workerTimeoutMs,
+        maxOutputBytes: config.maxOutputBytes ?? 10 * 1024 * 1024,
+        onMetric: (record) => appendMetric(config.projectRoot, record),
+        compilerRuntime: runtime,
+      })
+      return result.artifact
+    }
+
+    const b = config.budget ?? DEFAULT_BUDGET
+    const { plan } = planTask(task, config.projectRoot, config.constraints ?? DEFAULT_CONSTRAINTS, b.retryProbability, data.cts.worker_recommendation, b.maxSpend, runtime)
     const worker = plan.ladder[0]
     if (!worker) return makeArtifact('failure', packet.t, 'kernel', { reason: 'no feasible worker for this intent', recoverable: false })
     const result = await dispatchOne(packet, chunks, worker, {

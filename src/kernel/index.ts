@@ -12,3 +12,12 @@ export {
   runBlueprint,
   type BlueprintConfig, type BlueprintTaskOutcome
 } from './blueprint-orchestrator.js'
+
+export {
+  DefaultResolver,
+  type CapabilityResolver,
+  type ResolveRequest,
+  type Resolution,
+  type ScoreBreakdown,
+  type ExclusionReason,
+} from '../capability/resolver.js'
