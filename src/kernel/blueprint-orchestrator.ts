@@ -1,7 +1,8 @@
 import { DEFAULT_BUDGET, type BudgetConfig } from '../core/types.js'
-import { type Artifact, isKind, makeArtifact } from '../artifact/artifacts.js'
+import { type Artifact, isKind } from '../artifact/artifacts.js'
 import { type CodeChunk } from '../core/types.js'
 import { type SkillContext, type SkillDispatch } from '../skill/skill.js'
+import { DEFAULT_COMPILER_RUNTIME } from '../compiler/runtime.js'
 import { triageSkill, type TriageData } from '../skill/builtins.js'
 import { getBlueprint } from '../blueprint/blueprint.js'
 import { executeBlueprint, type BlueprintOutcome as RunnerOutcome, type ExecutedStep, type ProduceResult } from '../blueprint/runner.js'
@@ -35,6 +36,8 @@ export async function runBlueprint(task: string, config: BlueprintConfig): Promi
   const ingress = normalizeInput({ content: raw, kind: 'unknown', explicitGoal: config.goal })
   const taskId = ingress.ucp.t
 
+  const runtime = config.compilerRuntime ?? DEFAULT_COMPILER_RUNTIME
+
   const seedCtx: SkillContext = {
     taskId,
     task,
@@ -44,6 +47,7 @@ export async function runBlueprint(task: string, config: BlueprintConfig): Promi
     policies: basePolicies,
     blackboard: {},
     artifacts: [],
+    compilerRuntime: runtime,
   }
   const triaged = await triageSkill.execute(seedCtx)
   const data = triaged.data as TriageData
@@ -54,6 +58,7 @@ export async function runBlueprint(task: string, config: BlueprintConfig): Promi
   info(`blueprint: ${blueprint.name} (recommended: ${data.blueprint}) policies=${policies.name}`)
 
   const dispatch: SkillDispatch = async (packet, chunks) => {
+    const { makeArtifact } = runtime
     const budget = config.budget ?? DEFAULT_BUDGET
     const { plan } = planTask(task, config.projectRoot, config.constraints ?? DEFAULT_CONSTRAINTS, budget.retryProbability, data.cts.worker_recommendation, budget.maxSpend)
     const worker = plan.ladder[0]
@@ -62,14 +67,16 @@ export async function runBlueprint(task: string, config: BlueprintConfig): Promi
       timeoutMs: config.timeoutMs ?? policies.timeout.workerTimeoutMs,
       maxOutputBytes: config.maxOutputBytes ?? 10 * 1024 * 1024,
       onMetric: (record) => appendMetric(config.projectRoot, record),
+      compilerRuntime: runtime,
     })
     return result.artifact
   }
 
   const produce = async (): Promise<ProduceResult> => {
+    const { makeArtifact } = runtime
     const normalizedTask = data.normalizedTask
     const budget: BudgetConfig = { ...(config.budget ?? DEFAULT_BUDGET), maxInputTokens: policies.budget.maxInputTokens }
-    const prepared = prepareDispatch(normalizedTask, { ...config, budget }, data.cts.worker_recommendation)
+    const prepared = prepareDispatch(normalizedTask, { ...config, budget, compilerRuntime: runtime }, data.cts.worker_recommendation)
 
     if (prepared.kind === 'pointers') {
       const artifact = makeArtifact('pointer-set', taskId, 'kernel', { pointers: prepared.pointers })
@@ -80,7 +87,7 @@ export async function runBlueprint(task: string, config: BlueprintConfig): Promi
       return { artifacts: [...prepared.artifacts, artifact], accepted: false, summary: { iterations: 0, escalationDepth: 0, cost: 0, terminationReason: `budget refused: ${prepared.reason}`, status: 'finished' } }
     }
 
-    const contextService = defaultContextService(config.projectRoot, prepared.intent, budget, policies.context)
+    const contextService = defaultContextService(config.projectRoot, prepared.intent, budget, policies.context, runtime)
 
     const { loopResult, artifacts } = await executePrepared(prepared, {
       projectRoot: config.projectRoot,
@@ -88,6 +95,7 @@ export async function runBlueprint(task: string, config: BlueprintConfig): Promi
       maxOutputBytes: config.maxOutputBytes ?? 10 * 1024 * 1024,
       bounds: boundsFromPolicies(policies),
       contextService,
+      compilerRuntime: runtime,
       onMetric: (record) => appendMetric(config.projectRoot, record),
     })
 

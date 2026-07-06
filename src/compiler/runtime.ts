@@ -22,24 +22,8 @@ export interface CompilerRuntime {
   makeArtifact: ArtifactFactory
 }
 
-const defaultRuntime: CompilerRuntime = {
+export const DEFAULT_COMPILER_RUNTIME: CompilerRuntime = {
   compileIntent: defaultCompileIntent,
   compileContext: defaultCompileContext,
   makeArtifact,
-}
-
-let currentRuntime: CompilerRuntime = defaultRuntime
-
-export function getCompilerRuntime(): CompilerRuntime {
-  return currentRuntime
-}
-
-export function setCompilerRuntime(runtime: Partial<CompilerRuntime>): () => void {
-  const previous = currentRuntime
-  currentRuntime = { ...previous, ...runtime }
-  return () => { currentRuntime = previous }
-}
-
-export function resetCompilerRuntime(): void {
-  currentRuntime = defaultRuntime
 }

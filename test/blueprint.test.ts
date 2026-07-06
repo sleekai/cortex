@@ -82,7 +82,7 @@ test('blueprint policy overrides merge over the run policies', async () => {
   const probe: Skill = {
     name: 'probe-policy',
     purpose: 'test',
-    meta: { capabilities: [], costLevel: 'free', deterministic: true },
+    meta: { profile: { minimum: [] }, consumes: [], produces: [], costLevel: 'free', deterministic: true },
     applicable: () => true,
     execute: (ctx) => {
       seenMaxIter = ctx.policies.retry.maxIterations

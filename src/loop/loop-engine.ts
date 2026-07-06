@@ -12,7 +12,8 @@
 // evaluated before the Router runs, and no worker calls another worker.
 import { type UCP } from '../packet/ucp.js'
 import { type CodeChunk, type ValidationResult } from '../core/types.js'
-import { type Artifact, isKind, makeArtifact } from '../artifact/artifacts.js'
+import { type Artifact, isKind } from '../artifact/artifacts.js'
+import { type CompilerRuntime, DEFAULT_COMPILER_RUNTIME } from '../compiler/runtime.js'
 import { type ScoredWorker } from '../capability/planner.js'
 import { dispatchOne, type DispatchOptions, DEFAULT_DISPATCH_OPTIONS } from '../worker/dispatch.js'
 import { applyPatch, runValidationHooks } from '../validator/patch-apply.js'
@@ -79,6 +80,7 @@ export interface LoopEngineOptions {
   // how often to actually fetch) — returning the current chunks unchanged is
   // a legal "no". Absent service ⇒ behavior identical to before.
   contextService?: ContextService
+  compilerRuntime?: CompilerRuntime
 }
 
 export interface LoopEngineResult {
@@ -98,6 +100,7 @@ export async function runExecutionLoop(
   const bounds = options.bounds ?? DEFAULT_BOUNDS
   const evaluator = options.evaluator ?? hookDecisionEvaluator
   const ladderSize = Math.max(1, options.ladderSize)
+  const { makeArtifact } = options.compilerRuntime ?? DEFAULT_COMPILER_RUNTIME
 
   let state = initialState()
   let rung = 0

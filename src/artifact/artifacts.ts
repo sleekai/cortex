@@ -25,6 +25,17 @@ export type ArtifactKind =
   | 'failure'
   | 'clarification'
 
+export const ALL_ARTIFACT_KINDS: readonly ArtifactKind[] = [
+  'triage', 'grill', 'context', 'patch', 'plan', 'execution',
+  'evaluation', 'final', 'decision', 'review', 'test-result',
+  'pointer-set', 'token-estimate', 'compression', 'cost',
+  'intent', 'metric', 'failure', 'clarification',
+]
+
+export function isArtifactKind(v: unknown): v is ArtifactKind {
+  return typeof v === 'string' && (ALL_ARTIFACT_KINDS as readonly string[]).includes(v)
+}
+
 export type ReviewSeverity = 'R' | 'Y' | 'G'
 
 export interface ReviewFinding {

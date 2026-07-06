@@ -55,8 +55,9 @@ export function makeCompressionArtifact(
   taskId: string,
   sourceKind: ArtifactKind | 'context' | 'history' | 'text',
   result: CompressionResult,
+  makeArtifactFn: typeof makeArtifact = makeArtifact,
 ): Artifact<'compression'> {
-  return makeArtifact('compression', taskId, 'compression-runtime', {
+  return makeArtifactFn('compression', taskId, 'compression-runtime', {
     sourceKind,
     originalTokens: result.originalTokens,
     compressedTokens: result.compressedTokens,

@@ -4,8 +4,9 @@
 // deferred — see docs/adr/0001-defer-dag-execution.md.)
 import { type UCP } from '../packet/ucp.js'
 import { type CodeChunk } from '../core/types.js'
-import { type Artifact, makeArtifact, isKind } from '../artifact/artifacts.js'
+import { type Artifact, isKind } from '../artifact/artifacts.js'
 import { type ScoredWorker } from '../capability/planner.js'
+import { type CompilerRuntime, DEFAULT_COMPILER_RUNTIME } from '../compiler/runtime.js'
 import { createHarness } from '../harness/harness.js'
 import { buildPrompt } from './prompt.js'
 import { parseWorkerOutput } from './artifact-builder.js'
@@ -27,6 +28,7 @@ export interface DispatchOptions {
   timeoutMs: number
   maxOutputBytes: number
   onMetric?: (record: MetricRecord) => void
+  compilerRuntime?: CompilerRuntime
 }
 
 export const DEFAULT_DISPATCH_OPTIONS: DispatchOptions = {
@@ -42,6 +44,7 @@ export async function dispatchOne(
   worker: ScoredWorker,
   options: DispatchOptions = DEFAULT_DISPATCH_OPTIONS,
 ): Promise<NodeResult> {
+  const { makeArtifact } = options.compilerRuntime ?? DEFAULT_COMPILER_RUNTIME
   const prompt = buildPrompt(packet, chunks)
   const estInputTokens = estimateTokens(prompt)
   const harness = createHarness(worker.worker.harness)

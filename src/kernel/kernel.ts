@@ -20,7 +20,7 @@ import { reliabilityOverrides } from '../state/metrics.js'
 import { info, warn } from '../core/logger.js'
 import { type Artifact } from '../artifact/artifacts.js'
 import { compressChunks, makeCompressionArtifact } from '../runtime/compression.js'
-import { getCompilerRuntime, type CompilerRuntime } from '../compiler/runtime.js'
+import { DEFAULT_COMPILER_RUNTIME, type CompilerRuntime } from '../compiler/runtime.js'
 
 export interface KernelConfig {
   projectRoot: string
@@ -52,7 +52,7 @@ export function planTask(
   maxSpend: number = DEFAULT_BUDGET.maxSpend,
   runtime?: CompilerRuntime,
 ): PlannedTask {
-  const { compileIntent } = runtime ?? getCompilerRuntime()
+  const { compileIntent } = runtime ?? DEFAULT_COMPILER_RUNTIME
   const intent = compileIntent(task)
   const registry = loadRegistry(projectRoot)
   const priors = new Map(registry.workers.map(w => [w.id, w.reliability]))
@@ -67,7 +67,7 @@ export type PreparedDispatch =
   | { kind: 'packet'; intent: TaskIntent; plan: Plan; context: CompiledContext; ucp: UCP; budgeted: BudgetResult; artifacts: Artifact[] }
 
 export function prepareDispatch(task: string, config: KernelConfig, tierHint?: string): PreparedDispatch {
-  const runtime = config.compilerRuntime ?? getCompilerRuntime()
+  const runtime = config.compilerRuntime ?? DEFAULT_COMPILER_RUNTIME
   const { compileContext, makeArtifact } = runtime
   const budget = config.budget ?? DEFAULT_BUDGET
   const constraints = config.constraints ?? DEFAULT_CONSTRAINTS
@@ -98,7 +98,7 @@ export function prepareDispatch(task: string, config: KernelConfig, tierHint?: s
           estimatedTokens: context.estTokens,
           compressedText: compressed.text,
         }),
-        makeCompressionArtifact(taskId, 'context', compressed),
+        makeCompressionArtifact(taskId, 'context', compressed, makeArtifact),
       ],
     }
   }
@@ -131,7 +131,7 @@ export function prepareDispatch(task: string, config: KernelConfig, tierHint?: s
   const artifacts: Artifact[] = [
     planArtifact,
     contextArtifact,
-    makeCompressionArtifact(ucp.t, 'context', contextCompression),
+    makeCompressionArtifact(ucp.t, 'context', contextCompression, makeArtifact),
   ]
   if (budgeted.spend) {
     artifacts.push(makeArtifact('cost', ucp.t, 'cost-engine', {
@@ -156,7 +156,7 @@ export function prepareDispatch(task: string, config: KernelConfig, tierHint?: s
 }
 
 export function runLocate(task: string, projectRoot: string, goal?: string, runtime?: CompilerRuntime): string[] {
-  const { compileIntent, compileContext } = runtime ?? getCompilerRuntime()
+  const { compileIntent, compileContext } = runtime ?? DEFAULT_COMPILER_RUNTIME
   const intent = { ...compileIntent(task), taskType: 'locate' as const }
   const context = compileContext(projectRoot, goal ?? task, intent, DEFAULT_BUDGET)
   return context.pointers

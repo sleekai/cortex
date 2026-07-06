@@ -1,17 +1,20 @@
 import { test } from 'node:test'
 import * as assert from 'node:assert/strict'
+import * as fs from 'node:fs'
+import * as os from 'node:os'
+import * as path from 'node:path'
 import { type TaskIntent } from '../src/capability/capabilities.js'
 import { type CompiledContext } from '../src/retrieval/context-compiler.js'
 import { type BudgetConfig, DEFAULT_BUDGET } from '../src/core/types.js'
 import { type Artifact } from '../src/artifact/artifacts.js'
 import {
-  getCompilerRuntime,
-  setCompilerRuntime,
-  resetCompilerRuntime,
+  DEFAULT_COMPILER_RUNTIME,
   type CompilerRuntime,
 } from '../src/compiler/runtime.js'
 import { compileIntent } from '../src/capability/intent-compiler.js'
 import { makeArtifact } from '../src/artifact/artifacts.js'
+import { planTask, prepareDispatch, runLocate, type KernelConfig } from '../src/kernel/index.js'
+import '../src/harness/cli-harness.js'
 
 const FIXED_INTENT: TaskIntent = {
   taskType: 'patch',
@@ -33,14 +36,38 @@ const FIXED_CONTEXT: CompiledContext = {
   escalations: [],
 }
 
-test('default runtime matches direct imports (intent compiler)', () => {
-  const result = getCompilerRuntime().compileIntent('fix typo in README.md')
+const FIXED_ARTIFACT: Artifact = {
+  id: 'fake-id',
+  kind: 'cost',
+  taskId: 't-fake',
+  createdAt: '2026-01-01T00:00:00.000Z',
+  producedBy: 'fake',
+  body: {
+    promptTokens: 0, completionTokens: 0, cumulativeCost: 0,
+    compressionSavings: 0, escalationCost: 0, estimatedRemainingBudget: Infinity,
+  },
+}
+
+function makeProject(withSource = true): string {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cortex-runtime-'))
+  if (withSource) {
+    fs.writeFileSync(path.join(dir, 'auth.ts'), [
+      'export function validateToken(token: string): boolean {',
+      '  return token.length > 0 && !token.includes(" ")',
+      '}',
+    ].join('\n'))
+  }
+  return dir
+}
+
+test('DEFAULT_COMPILER_RUNTIME matches direct imports (intent compiler)', () => {
+  const result = DEFAULT_COMPILER_RUNTIME.compileIntent('fix typo in README.md')
   const direct = compileIntent('fix typo in README.md')
   assert.deepEqual(result, direct)
 })
 
-test('default runtime matches direct imports (artifact factory)', () => {
-  const result = getCompilerRuntime().makeArtifact('plan', 't-test', 'test', { steps: ['a'], workerLadder: ['w'], entryTier: 1, expectedSpend: 2 })
+test('DEFAULT_COMPILER_RUNTIME matches direct imports (artifact factory)', () => {
+  const result = DEFAULT_COMPILER_RUNTIME.makeArtifact('plan', 't-test', 'test', { steps: ['a'], workerLadder: ['w'], entryTier: 1, expectedSpend: 2 })
   const direct = makeArtifact('plan', 't-test', 'test', { steps: ['a'], workerLadder: ['w'], entryTier: 1, expectedSpend: 2 })
   assert.equal(result.kind, direct.kind)
   assert.equal(result.taskId, direct.taskId)
@@ -48,86 +75,51 @@ test('default runtime matches direct imports (artifact factory)', () => {
   assert.deepEqual(result.body, direct.body)
 })
 
-test('setCompilerRuntime overrides intent compiler', () => {
-  const restore = setCompilerRuntime({
-    compileIntent: () => FIXED_INTENT,
-  })
-  try {
-    const result = getCompilerRuntime().compileIntent('anything')
-    assert.equal(result.taskType, 'patch')
-    assert.equal(result.complexity, 'trivial')
-    assert.equal(result.confidence, 0.9)
-  } finally {
-    restore()
+test('planTask injected runtime overrides intent compiler', () => {
+  const recorded: string[] = []
+  const stub: CompilerRuntime = {
+    ...DEFAULT_COMPILER_RUNTIME,
+    compileIntent: (r: string) => {
+      recorded.push(r)
+      return FIXED_INTENT
+    },
+  }
+  const dir = makeProject(false)
+  const { intent } = planTask('anything', dir, undefined, undefined, undefined, undefined, stub)
+  assert.equal(intent.taskType, 'patch')
+  assert.ok(recorded.includes('anything'))
+})
+
+test('prepareDispatch KernelConfig.compilerRuntime reaches artifact factories', () => {
+  const dir = makeProject()
+  const made: { kind: string; producedBy: string }[] = []
+  const stub: CompilerRuntime = {
+    compileIntent: DEFAULT_COMPILER_RUNTIME.compileIntent,
+    compileContext: DEFAULT_COMPILER_RUNTIME.compileContext,
+    makeArtifact: (kind, _taskId, producedBy, body) => {
+      made.push({ kind, producedBy })
+      return DEFAULT_COMPILER_RUNTIME.makeArtifact(kind, _taskId, producedBy, body as never)
+    },
+  }
+  const config: KernelConfig = { projectRoot: dir, compilerRuntime: stub }
+  const prepared = prepareDispatch('fix token validation in auth.ts', config)
+  assert.ok(made.length > 0)
+  if (prepared.kind === 'packet') {
+    assert.ok(made.some(m => m.kind === 'plan'), `expected plan artifact, got: ${JSON.stringify(made)}`)
+    assert.ok(made.some(m => m.kind === 'context'), `expected context artifact, got: ${JSON.stringify(made)}`)
   }
 })
 
-test('setCompilerRuntime overrides context compiler', () => {
-  const restore = setCompilerRuntime({
-    compileContext: () => FIXED_CONTEXT,
-  })
-  try {
-    const result = getCompilerRuntime().compileContext('', '', FIXED_INTENT, DEFAULT_BUDGET)
-    assert.equal(result.level, 0)
-    assert.deepEqual(result.pointers, ['src/test.ts'])
-  } finally {
-    restore()
+test('runLocate with injected runtime uses custom compileIntent', () => {
+  const recorded: string[] = []
+  const stub: CompilerRuntime = {
+    ...DEFAULT_COMPILER_RUNTIME,
+    compileIntent: (r: string) => {
+      recorded.push(r)
+      return { ...FIXED_INTENT, taskType: 'locate' }
+    },
   }
-})
-
-test('setCompilerRuntime overrides artifact factory', () => {
-  const restore = setCompilerRuntime({
-    makeArtifact: ((kind: string, taskId: string, producedBy: string, body: unknown) => ({
-      id: 'fake-id',
-      kind,
-      taskId,
-      createdAt: '2026-01-01T00:00:00.000Z',
-      producedBy,
-      body,
-    })) as CompilerRuntime['makeArtifact'],
-  })
-  try {
-    const result = getCompilerRuntime().makeArtifact('cost', 't-fake', 'fake', {
-      promptTokens: 0, completionTokens: 0, cumulativeCost: 0,
-      compressionSavings: 0, escalationCost: 0, estimatedRemainingBudget: Infinity,
-    })
-    assert.equal(result.id, 'fake-id')
-    assert.equal(result.taskId, 't-fake')
-  } finally {
-    restore()
-  }
-})
-
-test('partial override keeps other compilers at defaults', () => {
-  const restore = setCompilerRuntime({
-    compileIntent: () => FIXED_INTENT,
-  })
-  try {
-    const result = getCompilerRuntime()
-    assert.equal(result.compileIntent('x').taskType, 'patch')
-    assert.notEqual(result.compileContext, undefined)
-    assert.notEqual(result.makeArtifact, undefined)
-  } finally {
-    restore()
-  }
-})
-
-test('resetCompilerRuntime restores defaults', () => {
-  setCompilerRuntime({
-    compileIntent: () => FIXED_INTENT,
-  })
-  resetCompilerRuntime()
-  const result = getCompilerRuntime().compileIntent('fix typo in README.md')
-  const direct = compileIntent('fix typo in README.md')
-  assert.deepEqual(result, direct)
-})
-
-test('restore function restores previous runtime', () => {
-  const restore = setCompilerRuntime({
-    compileIntent: () => FIXED_INTENT,
-  })
-  restore()
-  const result = getCompilerRuntime().compileIntent('fix typo in README.md')
-  const direct = compileIntent('fix typo in README.md')
-  assert.deepEqual(result, direct)
+  const dir = makeProject()
+  runLocate('find auth.ts', dir, undefined, stub)
+  assert.ok(recorded.some(r => r.includes('auth')), `expected recorded to include auth, got: ${JSON.stringify(recorded)}`)
 })

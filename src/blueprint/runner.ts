@@ -7,6 +7,7 @@ import { type Artifact, isKind } from '../artifact/artifacts.js'
 import { type UCP } from '../packet/ucp.js'
 import { type PolicySet, mergePolicies } from '../policy/policies.js'
 import { type Skill, type SkillContext, type SkillDispatch, type SkillOutcome } from '../skill/skill.js'
+import { type CompilerRuntime, DEFAULT_COMPILER_RUNTIME } from '../compiler/runtime.js'
 import { getSkill } from '../skill/registry.js'
 import { type Blueprint, type BlueprintRunView } from './blueprint.js'
 import { info, warn } from '../core/logger.js'
@@ -37,10 +38,10 @@ export interface BlueprintRunConfig {
   ucp?: UCP
   dispatch?: SkillDispatch
   produce: ProduceExecutor
-  // Seed state (e.g. the kernel pre-ran triage to select this blueprint).
   blackboard?: Record<string, unknown>
   artifacts?: Artifact[]
   onStep?: (stepId: string, outcome: SkillOutcome | ProduceResult) => void
+  compilerRuntime?: CompilerRuntime
 }
 
 export interface ExecutedStep {
@@ -63,6 +64,9 @@ export async function executeBlueprint(blueprint: Blueprint, config: BlueprintRu
 
   const view = (): BlueprintRunView => ({ blackboard, artifacts })
 
+  const runtime = config.compilerRuntime ?? DEFAULT_COMPILER_RUNTIME
+  const { makeArtifact: rtMakeArtifact } = runtime
+
   for (const step of blueprint.steps) {
     if (step.when && !step.when(view())) {
       steps.push({ id: step.id, kind: step.kind, ran: false, reason: 'condition false' })
@@ -74,7 +78,7 @@ export async function executeBlueprint(blueprint: Blueprint, config: BlueprintRu
       const result = await config.produce(view())
       artifacts.push(...result.artifacts)
       for (const artifact of result.artifacts.filter(a => a.kind !== 'compression')) {
-        artifacts.push(makeCompressionArtifact(config.taskId, artifact.kind, compressArtifact(artifact)))
+        artifacts.push(makeCompressionArtifact(config.taskId, artifact.kind, compressArtifact(artifact), rtMakeArtifact))
       }
       blackboard['produce'] = result.summary
       lastProduce = result
@@ -85,8 +89,6 @@ export async function executeBlueprint(blueprint: Blueprint, config: BlueprintRu
 
     const skill = getSkill(step.skill)
     if (!skill) {
-      // A blueprint naming an unregistered skill is a wiring error, not a
-      // runtime condition — fail loud so plugins surface their absence.
       throw new Error(`blueprint ${blueprint.name}: step ${step.id} names unregistered skill "${step.skill}"`)
     }
 
@@ -98,6 +100,7 @@ export async function executeBlueprint(blueprint: Blueprint, config: BlueprintRu
       policies,
       blackboard,
       artifacts,
+      compilerRuntime: runtime,
       ...(config.ucp ? { ucp: config.ucp } : {}),
       ...(config.dispatch ? { dispatch: config.dispatch } : {}),
     }
@@ -114,7 +117,7 @@ export async function executeBlueprint(blueprint: Blueprint, config: BlueprintRu
     const outcome = await skill.execute(ctx)
     artifacts.push(...outcome.artifacts)
     for (const artifact of outcome.artifacts.filter(a => a.kind !== 'compression')) {
-      artifacts.push(makeCompressionArtifact(config.taskId, artifact.kind, compressArtifact(artifact)))
+      artifacts.push(makeCompressionArtifact(config.taskId, artifact.kind, compressArtifact(artifact), rtMakeArtifact))
     }
     if (outcome.data) blackboard[skill.name] = outcome.data
     steps.push({ id: step.id, kind: 'skill', ran: true })

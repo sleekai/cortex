@@ -9,7 +9,7 @@
 //
 // Triage and grilling are deterministic (zero model calls). Summarize and
 // review use the injected SkillDispatch seam and are inapplicable without it.
-import { makeArtifact, isKind } from '../artifact/artifacts.js'
+import { isKind } from '../artifact/artifacts.js'
 import { type UCP, type PacketOut } from '../packet/ucp.js'
 import { generateJudgmentPacket } from '../packet/generator.js'
 import { type TaskIntent } from '../capability/capabilities.js'
@@ -19,7 +19,6 @@ import { type CTSPacket } from '../triage/packet.js'
 import '../triage/stages/builtins.js'
 import { registerSkill } from './registry.js'
 import { type Skill, type SkillContext, observation } from './skill.js'
-import { getCompilerRuntime } from '../compiler/runtime.js'
 
 // The blackboard slice the triage skill publishes — downstream skills and the
 // kernel's blueprint selection read this shape from blackboard['triage'].
@@ -53,14 +52,20 @@ function contextUcp(ctx: SkillContext): UCP {
 export const triageSkill: Skill = {
   name: 'triage',
   purpose: 'Classify the task, estimate complexity, recommend an execution blueprint and initial worker tier.',
-  meta: { capabilities: ['planning'], costLevel: 'free', deterministic: true },
+  meta: {
+    profile: { minimum: [{ capability: 'planning', minimum: 0 }], cost: 'free' },
+    consumes: [],
+    produces: ['intent', 'triage'],
+    costLevel: 'free',
+    deterministic: true,
+  },
   // Runs once per task: the kernel may pre-run it to pick the blueprint, in
   // which case the blueprint's own triage step finds the data and skips.
   applicable(ctx) {
     return triageData(ctx) === undefined
   },
   execute(ctx) {
-    const { compileIntent } = getCompilerRuntime()
+    const { compileIntent, makeArtifact } = ctx.compilerRuntime
     const cts = runTriage({ ucp: contextUcp(ctx), raw: ctx.raw || ctx.task })
     const intent = compileIntent(cts.normalized_task)
     const data: TriageData = {
@@ -101,7 +106,13 @@ export const triageSkill: Skill = {
 export const grillingSkill: Skill = {
   name: 'grilling',
   purpose: 'Detect ambiguity and missing requirements; generate clarification questions.',
-  meta: { capabilities: ['reasoning'], costLevel: 'free', deterministic: true },
+  meta: {
+    profile: { minimum: [{ capability: 'reasoning', minimum: 0 }], cost: 'free' },
+    consumes: ['triage'],
+    produces: ['clarification', 'grill'],
+    costLevel: 'free',
+    deterministic: true,
+  },
   // Only when policy says the ambiguity justifies interrupting (MVP §9) —
   // a clear task skips the grill entirely.
   applicable(ctx) {
@@ -110,6 +121,7 @@ export const grillingSkill: Skill = {
     return ctx.policies.clarification.shouldClarify(data.cts.ambiguity.score)
   },
   execute(ctx) {
+    const { makeArtifact } = ctx.compilerRuntime
     const data = triageData(ctx)
     const questions = data && data.cts.ambiguity.questions.length > 0
       ? data.cts.ambiguity.questions
@@ -144,7 +156,13 @@ function judgmentPacket(ctx: SkillContext, act: 'ask' | 'review', question: stri
 export const summarizeSkill: Skill = {
   name: 'summarize',
   purpose: 'Produce a compact summary of the task/change under review.',
-  meta: { capabilities: ['docs', 'reasoning'], costLevel: 'low', deterministic: false },
+  meta: {
+    profile: { minimum: [{ capability: 'docs', minimum: 0.3 }, { capability: 'reasoning', minimum: 0.3 }], cost: 'low' },
+    consumes: [],
+    produces: ['decision'],
+    costLevel: 'low',
+    deterministic: false,
+  },
   applicable(ctx) {
     return ctx.dispatch !== undefined
   },
@@ -165,7 +183,13 @@ export const summarizeSkill: Skill = {
 export const reviewSkill: Skill = {
   name: 'review',
   purpose: 'Review code or a change set and report a verdict with findings.',
-  meta: { capabilities: ['review'], costLevel: 'medium', deterministic: false },
+  meta: {
+    profile: { minimum: [{ capability: 'review', minimum: 0.5 }], cost: 'medium' },
+    consumes: ['patch'],
+    produces: ['review'],
+    costLevel: 'medium',
+    deterministic: false,
+  },
   applicable(ctx) {
     return ctx.dispatch !== undefined
   },

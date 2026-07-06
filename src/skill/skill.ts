@@ -14,12 +14,42 @@
 // Skills never: escalate, retry, pick workers, or terminate execution. They
 // emit observations (confidence, missing context, recommended action); the
 // blueprint runner and policies decide what happens next (MVP §5).
-import { type Artifact } from '../artifact/artifacts.js'
+import { type Artifact, type ArtifactKind } from '../artifact/artifacts.js'
+import { type Capability } from '../capability/capabilities.js'
 import { type UCP } from '../packet/ucp.js'
 import { type CodeChunk } from '../core/types.js'
 import { type PolicySet } from '../policy/policies.js'
+import { type CompilerRuntime } from '../compiler/runtime.js'
 
 export type SkillCostLevel = 'free' | 'low' | 'medium' | 'high'
+
+// A scored requirement against one capability dimension. minimum is 0..1:
+// 0 = any worker with this capability suffices, 1 = only the strongest.
+export interface CapabilityRequirement {
+  capability: Capability
+  minimum: number
+  weight?: number
+}
+
+// Machine-readable capability profile — what a skill needs from its worker.
+// Tools and context requirements are deferred to later phases.
+export interface CapabilityProfile {
+  minimum: CapabilityRequirement[]
+  preferred?: CapabilityRequirement[]
+  forbidden?: Capability[]
+  cost?: SkillCostLevel
+}
+
+// The machine-readable contract a skill publishes. Registry introspection and
+// the Phase 3 capability resolver consume this shape.
+export interface SkillContract {
+  name: string
+  purpose: string
+  profile: CapabilityProfile
+  consumes: ArtifactKind[]
+  produces: ArtifactKind[]
+  deterministic: boolean
+}
 
 // What a skill recommends the runtime do next. A recommendation, never a
 // command: the runner consults policy before honoring it.
@@ -50,24 +80,21 @@ export type SkillDispatch = (packet: UCP, chunks: CodeChunk[]) => Promise<Artifa
 
 export interface SkillContext {
   taskId: string
-  // The current (possibly triage-normalized) task text.
   task: string
-  // Original raw input, before any normalization.
   raw: string
   projectRoot: string
-  // Ingress-normalized packet when the run came through a harness adapter.
   ucp?: UCP
   policies: PolicySet
-  // Shared state keyed by skill name: each skill's outcome.data lands here.
   blackboard: Record<string, unknown>
-  // Artifacts accumulated so far this run (read, don't mutate).
   artifacts: readonly Artifact[]
   dispatch?: SkillDispatch
+  compilerRuntime: CompilerRuntime
 }
 
 export interface SkillMeta {
-  // Capability vocabulary the skill exercises (documentation for planners).
-  capabilities: string[]
+  profile: CapabilityProfile
+  consumes: ArtifactKind[]
+  produces: ArtifactKind[]
   costLevel: SkillCostLevel
   deterministic: boolean
 }

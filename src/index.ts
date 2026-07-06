@@ -390,7 +390,8 @@ function commandBlueprints(): void {
 
 function commandSkills(): void {
   for (const s of registeredSkills()) {
-    process.stdout.write(`${s.name} [${s.meta.costLevel}${s.meta.deterministic ? ', deterministic' : ''}]: ${s.purpose}\n`)
+    const caps = s.meta.profile.minimum.map(r => r.capability).join(',')
+    process.stdout.write(`${s.name} [${s.meta.costLevel}${s.meta.deterministic ? ', deterministic' : ''}]: ${s.purpose}\n  caps: ${caps}\n  produces: ${s.meta.produces.join(', ')}\n`)
   }
 }
 
