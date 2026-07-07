@@ -106,7 +106,7 @@ describe('mcp-server', () => {
   test('cortex_metrics returns message when no metrics', async () => {
     const result = await client.callTool({
       name: 'cortex_metrics',
-      arguments: { dir: process.cwd() },
+      arguments: { dir: `/tmp/cortex-mcp-metrics-${Date.now()}` },
     })
     assert.ok(!('isError' in result) || !result.isError)
     const text = (result.content as { text: string }[])[0]!.text
