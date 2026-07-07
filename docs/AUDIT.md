@@ -86,7 +86,7 @@ error-only retry ≤3) → artifacts + state + metrics persisted.
 | `core/signals.ts` shared signal tables | `FILE_PATTERN`, `OPEN_SIGNALS`, `TRIVIAL_SIGNALS`, `classifyComplexity` | **added** — deduplicated from intent-compiler + triage |
 | `retrieval/` AST, TF-IDF, git-recency, L0–L4 compiler | deterministic, budget-gated escalation | **keep; escalation trigger is narrow (see §4)** |
 | `validator/` patch-apply + loop | error-only retry packets (tested invariant) | **keep unchanged** |
-| `compiler/` runtime facade | injectable CompilerRuntime (intent, context, artifact compilation seams) | **done** — `src/compiler/runtime.ts`; kernel, skills, dispatch, and context-on-demand route through it; direct exports preserved for one release |
+| `compiler/` runtime facade | injectable CompilerRuntime (intent, context, artifact compilation seams) | **done** — immutable `DEFAULT_COMPILER_RUNTIME`; threaded through KernelConfig, SkillContext, loop, dispatch, context-on-demand, and blueprint runner; no global mutable state |
 | `state/` store + metrics | `.cortex/` engine, legacy migration, JSONL learning loop → planner priors | **keep** |
 | `worker/artifact-builder.ts` + diff-extractor, json-extractor | parse-once boundary over two focused extractors (the output-parser pass-through was inlined) | **keep** |
 | `index.ts` | CLI surface over `kernel/` | **done** — pipeline extracted |

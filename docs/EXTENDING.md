@@ -163,8 +163,8 @@ Three compiler services behind one replaceable facade:
 - **Context Compiler** — goal + intent → minimal `CompiledContext` (L0–L4)
 - **Artifact Compiler** — raw worker output → typed `Artifact` (parse-once)
 
-`setCompilerRuntime({ intent: myLlmClassifier })` swaps any service without
-touching callers; it returns a restore function.
+Pass `compilerRuntime` in `KernelConfig` or `SkillContext` to override a
+service for a single call; `DEFAULT_COMPILER_RUNTIME` is the immutable default.
 
 ## Execution lifecycle (`kernel.runBlueprint`)
 
