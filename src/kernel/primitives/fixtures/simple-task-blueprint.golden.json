@@ -1,0 +1,46 @@
+{
+  "description": "Locate relevant code, then produce a bounded patch under policy.",
+  "directives": [
+    {
+      "id": "d-scope-narrow",
+      "instruction": "Keep the patch to the smallest change that satisfies the task.",
+      "kind": "directive",
+      "schemaVersion": 1,
+      "scope": {
+        "kind": "node",
+        "node": "n-produce"
+      },
+      "weight": 1
+    }
+  ],
+  "id": "bp-simple-patch",
+  "kind": "blueprint",
+  "name": "simple-patch",
+  "nodes": [
+    {
+      "id": "n-locate",
+      "kind": "node",
+      "schemaVersion": 1,
+      "skill": "locate",
+      "step": "skill"
+    },
+    {
+      "id": "n-produce",
+      "kind": "node",
+      "schemaVersion": 1,
+      "step": "produce"
+    }
+  ],
+  "policy": {
+    "ambiguityThreshold": 0.4,
+    "clarificationMode": "proceed",
+    "kind": "policy",
+    "maxCost": 100,
+    "maxEscalationDepth": 2,
+    "maxInputTokens": 2500,
+    "maxIterations": 3,
+    "name": "bounded-default",
+    "schemaVersion": 1
+  },
+  "schemaVersion": 1
+}
