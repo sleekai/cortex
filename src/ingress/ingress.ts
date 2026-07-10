@@ -1,19 +1,15 @@
-// Ingress Layer — normalizes heterogeneous external input into standardized
-// internal representation. Every entry point (CLI, MCP, IDE, browser) must
-// route through here before the kernel touches the task text.
-//
-// Responsibilities:
-//   - Capture raw input from any harness
-//   - Normalize into a UCP packet with source metadata
-//   - Lightweight pre-classification (zero model calls)
-//   - Strip irrelevant context noise
-//   - Attach constraints + session continuity
+// Ingress — normalizes heterogeneous external input into a standardized
+// internal representation. Every entry point (CLI, MCP) routes through
+// normalizeInput before the kernel touches the task text: raw input becomes
+// a UCP packet with source metadata plus a lightweight pre-classification
+// (zero model calls). A per-source adapter registry is deliberately
+// deferred until a second real ingress source exists — see
+// docs/adr/0002-defer-adapter-registries.md.
 //
 // NOT responsible for: planning, scheduling, worker selection, reasoning.
 
 import { type UCP, type PacketAct } from '../packet/ucp.js'
 import { compressGoal, extractConstraints } from '../packet/generator.js'
-import { type Artifact } from '../artifact/artifacts.js'
 import * as crypto from 'node:crypto'
 
 export type HarnessKind = 'cli' | 'mcp' | 'opencode' | 'ide' | 'web-browser' | 'http' | 'unknown'
@@ -38,34 +34,6 @@ export interface IngressPacket {
     likelyType: PacketAct
     confidence: number
   }
-}
-
-export interface OutputFormat {
-  kind: string
-  mimeType: string
-}
-
-export interface HarnessAdapter {
-  kind: HarnessKind
-  description: string
-  normalize(raw: RawInput): IngressPacket
-  renderOutput(artifact: Artifact): string
-  renderBundle(artifacts: Artifact[]): string
-  supportedFormats(): OutputFormat[]
-}
-
-const adapters = new Map<HarnessKind, HarnessAdapter>()
-
-export function registerAdapter(adapter: HarnessAdapter): void {
-  adapters.set(adapter.kind, adapter)
-}
-
-export function getAdapter(kind: HarnessKind): HarnessAdapter | undefined {
-  return adapters.get(kind)
-}
-
-export function registeredAdapters(): HarnessAdapter[] {
-  return [...adapters.values()]
 }
 
 function generateTaskId(): string {

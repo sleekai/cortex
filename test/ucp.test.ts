@@ -1,7 +1,7 @@
 import { test } from 'node:test'
 import * as assert from 'node:assert/strict'
 import { parsePacket, validatePacket, type UCP } from '../src/packet/ucp.js'
-import { generateWorkPacket, generateAskPacket, generateErrorPacket } from '../src/packet/generator.js'
+import { generateWorkPacket, generateJudgmentPacket, generateErrorPacket } from '../src/packet/generator.js'
 
 test('v1 packets upgrade to v2 work packets', () => {
   const v1 = JSON.stringify({
@@ -48,10 +48,13 @@ test('generateWorkPacket compresses the goal and extracts constraints', () => {
   assert.equal(validatePacket(packet).valid, true)
 })
 
-test('generateAskPacket is a valid judgment packet', () => {
-  const packet = generateAskPacket('t9', 'REST or GraphQL for the new API?', ['human decided: TypeScript'], ['src/api.ts'], ['spec: /tmp/spec.md#L4'])
+test('generateJudgmentPacket derives a valid ask packet from a work packet', () => {
+  const base = generateWorkPacket('Choose the API style for the new service.', [], [])
+  const packet = generateJudgmentPacket(base, 'ask', 'REST or GraphQL for the new API?')
   assert.equal(packet.act, 'ask')
   assert.equal(packet.q, 'REST or GraphQL for the new API?')
+  assert.equal(packet.r.out, 'decision')
+  assert.equal(packet.t, base.t)
   assert.equal(validatePacket(packet).valid, true)
 })
 

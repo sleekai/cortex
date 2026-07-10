@@ -4,31 +4,28 @@
 import { type WorkerSpec } from '../worker/registry.js'
 import { type TaskIntent } from './capabilities.js'
 
-export interface Policy {
+export interface PlannerConstraints {
   // Workers that must never be selected, by id.
   denyWorkers: string[]
-  // Spend ceiling per dispatch (relative cost units); Infinity = uncapped.
-  maxSpendPerDispatch: number
   // When true, only workers with writeAccess 'patch' may produce patches.
   enforceWriteAccess: boolean
 }
 
-export const DEFAULT_POLICY: Policy = {
+export const DEFAULT_CONSTRAINTS: PlannerConstraints = {
   denyWorkers: [],
-  maxSpendPerDispatch: Number.POSITIVE_INFINITY,
   enforceWriteAccess: true,
 }
 
-export interface PolicyVerdict {
+export interface ConstraintVerdict {
   allowed: boolean
   reason?: string
 }
 
-export function checkPolicy(worker: WorkerSpec, intent: TaskIntent, policy: Policy): PolicyVerdict {
-  if (policy.denyWorkers.includes(worker.id)) {
+export function checkConstraints(worker: WorkerSpec, intent: TaskIntent, constraints: PlannerConstraints): ConstraintVerdict {
+  if (constraints.denyWorkers.includes(worker.id)) {
     return { allowed: false, reason: `worker ${worker.id} is deny-listed` }
   }
-  if (policy.enforceWriteAccess && intent.expectedOutput === 'patch' && worker.writeAccess !== 'patch') {
+  if (constraints.enforceWriteAccess && intent.expectedOutput === 'patch' && worker.writeAccess !== 'patch') {
     return { allowed: false, reason: `worker ${worker.id} has no patch write access` }
   }
   if (worker.contextWindow < intent.estTokenBudget) {

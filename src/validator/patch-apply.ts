@@ -82,12 +82,16 @@ export function runValidationHooks(projectRoot: string): ValidationResult {
       info(`${hook}: passed`)
       debug(out)
     } catch (e: unknown) {
-      const msg = e instanceof Error ? e.message : String(e)
+      // execSync puts the process output on e.stdout/e.stderr, not in the
+      // message — the message alone would leave error extraction (and the
+      // error-only retry packets built from it) empty.
+      const err = e as { message?: string; stdout?: string; stderr?: string }
+      const combined = [err.stdout, err.stderr, err.message].filter(Boolean).join('\n')
       warn(`${hook}: FAILED`)
       return {
         passed: false,
-        errors: extractErrors(msg),
-        output: msg,
+        errors: extractErrors(combined),
+        output: combined,
         iteration: 0,
       }
     }

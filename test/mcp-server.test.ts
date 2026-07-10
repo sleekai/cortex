@@ -44,15 +44,16 @@ after(async () => {
 
 describe('mcp-server', () => {
 
-  test('tools/list returns all 6 cortex tools', async () => {
+  test('tools/list returns all 7 cortex tools', async () => {
     const result = await client.listTools()
-    assert.equal(result.tools.length, 6)
+    assert.equal(result.tools.length, 7)
     const names = result.tools.map((t: { name: string }) => t.name)
     assert.ok(names.includes('cortex_plan'))
     assert.ok(names.includes('cortex_locate'))
     assert.ok(names.includes('cortex_workers'))
     assert.ok(names.includes('cortex_metrics'))
     assert.ok(names.includes('cortex_dispatch'))
+    assert.ok(names.includes('cortex_exec'))
     assert.ok(names.includes('cortex_init'))
   })
 
@@ -105,7 +106,7 @@ describe('mcp-server', () => {
   test('cortex_metrics returns message when no metrics', async () => {
     const result = await client.callTool({
       name: 'cortex_metrics',
-      arguments: { dir: process.cwd() },
+      arguments: { dir: `/tmp/cortex-mcp-metrics-${Date.now()}` },
     })
     assert.ok(!('isError' in result) || !result.isError)
     const text = (result.content as { text: string }[])[0]!.text

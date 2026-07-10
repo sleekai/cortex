@@ -7,16 +7,19 @@ import { z } from 'zod'
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { DEFAULT_BUDGET, type BudgetConfig } from './core/types.js'
-import { compileIntent } from './capability/intent-compiler.js'
 import { loadRegistry } from './worker/registry.js'
-import { compileContext } from './retrieval/context-compiler.js'
 import { buildPrompt } from './worker/prompt.js'
-import { planTask, prepareDispatch, runTask } from './kernel/kernel.js'
+import { planTask, prepareDispatch, executeTask, runBlueprint, runLocate, listWorkers, triagedTask, type BlueprintConfig } from './kernel/index.js'
+import { getPolicySet, DEFAULT_POLICIES } from './policy/policies.js'
+import { renderBlueprintSummary } from './egress/egress.js'
 import { initProject } from './state/store.js'
 import { readMetrics, aggregateStats } from './state/metrics.js'
-import { createHarness } from './harness/harness.js'
 import { normalizeInput as ingressNormalize } from './ingress/ingress.js'
 import { renderPlanSummary, renderPointerList } from './egress/egress.js'
+import { isKind } from './artifact/artifacts.js'
+// Triage Skill System (CTS) — opt-in per-call via the `triage` argument.
+import './triage/stages/builtins.js'
+import { runTriage } from './triage/pipeline.js'
 
 const server = new McpServer({
   name: 'cortex',
@@ -31,20 +34,26 @@ const server = new McpServer({
 const taskSchema = { task: z.string().describe('Task description (e.g. "add JWT auth to Express app")') }
 const goalSchema = { goal: z.string().optional().describe('Optional goal keywords (derived from task if omitted)') }
 const dirSchema = { dir: z.string().optional().describe('Project root directory (default: cwd)') }
+const triageSchema = { triage: z.boolean().optional().describe('Run the Triage Skill System first (normalize + structure the task before intent compilation)') }
 
 function resolveDir(dir?: string): string {
   return dir ?? process.cwd()
 }
 
+// Opt-in CTS seam. Triage itself runs inside the kernel (once per task) when
+// config.triage is set; this surface only forwards the flag.
+
 server.registerTool('cortex_plan', {
   title: 'cortex-plan',
   description: 'Compile intent and show dispatch plan. Read-only — no model calls, no side effects.',
-  inputSchema: { ...taskSchema, ...goalSchema, ...dirSchema },
+  inputSchema: { ...taskSchema, ...goalSchema, ...dirSchema, ...triageSchema },
 }, (args) => {
   try {
     const projectRoot = resolveDir(args.dir)
     const ingressPacket = ingressNormalize({ content: args.task, kind: 'mcp', explicitGoal: args.goal, metadata: { projectRoot } })
-    const { intent, plan } = planTask(args.task, projectRoot)
+    const cts = args.triage ? runTriage(ingressPacket) : undefined
+    const task = cts ? cts.normalized_task : args.task
+    const { intent, plan } = planTask(task, projectRoot, undefined, undefined, cts?.worker_recommendation)
     const data = {
       intent,
       plan,
@@ -53,6 +62,7 @@ server.registerTool('cortex_plan', {
         sessionId: ingressPacket.sessionId,
         preClassified: ingressPacket.preClassified,
       },
+      ...(cts ? { _triage: cts } : {}),
     }
     return { content: [{ type: 'text', text: renderPlanSummary(data, { targetKind: 'mcp' }) }] }
   } catch (e: unknown) {
@@ -69,9 +79,8 @@ server.registerTool('cortex_locate', {
   try {
     const projectRoot = resolveDir(args.dir)
     const ingressPacket = ingressNormalize({ content: args.task, kind: 'mcp', explicitGoal: args.goal, metadata: { projectRoot } })
-    const intent = { ...compileIntent(args.task), taskType: 'locate' as const }
-    const context = compileContext(projectRoot, ingressPacket.ucp.g, intent, DEFAULT_BUDGET)
-    const text = renderPointerList(context.pointers, { targetKind: 'mcp' })
+    const pointers = runLocate(args.task, projectRoot, ingressPacket.ucp.g)
+    const text = renderPointerList(pointers)
     return { content: [{ type: 'text', text }] }
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : String(e)
@@ -86,19 +95,11 @@ server.registerTool('cortex_workers', {
 }, (args) => {
   try {
     const projectRoot = resolveDir(args.dir)
-    const registry = loadRegistry(projectRoot)
-    const stats = aggregateStats(readMetrics(projectRoot))
     const lines: string[] = []
-    for (const w of registry.workers) {
-      let availability = 'unknown'
-      try {
-        availability = createHarness(w.harness).available() ? 'available' : 'UNAVAILABLE'
-      } catch (e: unknown) {
-        availability = `error: ${e instanceof Error ? e.message : String(e)}`
-      }
-      const s = stats.get(w.id)
-      const observed = s ? `  success: ${(s.successRate * 100).toFixed(0)}% (${s.dispatches} dispatches)` : ''
-      lines.push(`${w.id}  tier=${w.tier}  caps=${w.capabilities.join(',')}  harness=${w.harness.kind}  ${availability}${observed}`)
+    for (const w of listWorkers(projectRoot)) {
+      const availability = w.availableError ?? (w.available ? 'available' : 'UNAVAILABLE')
+      const observed = w.dispatches ? `  success: ${((w.successRate ?? 0) * 100).toFixed(0)}% (${w.dispatches} dispatches)` : ''
+      lines.push(`${w.id}  tier=${w.tier}  caps=${w.capabilities.join(',')}  harness=${w.harnessKind}  ${availability}${observed}`)
     }
     return { content: [{ type: 'text', text: lines.join('\n') }] }
   } catch (e: unknown) {
@@ -143,6 +144,7 @@ server.registerTool('cortex_dispatch', {
     budget: z.number().optional().describe('Max input tokens (default: 2500)'),
     timeout: z.number().optional().describe('Worker timeout in ms (default: 180000)'),
     dry_run: z.boolean().optional().describe('Print packet + prompt and exit without executing'),
+    ...triageSchema,
   },
 }, async (args) => {
   try {
@@ -161,12 +163,14 @@ server.registerTool('cortex_dispatch', {
       goal: ingressPacket.ucp.g,
       budget: budgetConfig,
       timeoutMs: args.timeout ?? 180_000,
+      triage: args.triage ?? false,
     }
 
     if (args.dry_run) {
-      const prepared = prepareDispatch(args.task, config)
+      const triaged = triagedTask(args.task, config)
+      const prepared = prepareDispatch(triaged.task, config, triaged.tierHint)
       if (prepared.kind === 'pointers') {
-        return { content: [{ type: 'text', text: renderPointerList(prepared.pointers, { targetKind: 'mcp' }) }] }
+        return { content: [{ type: 'text', text: renderPointerList(prepared.pointers) }] }
       }
       if (prepared.kind === 'refused') {
         return { content: [{ type: 'text', text: `budget refused dispatch: ${prepared.reason}` }], isError: true }
@@ -180,32 +184,73 @@ server.registerTool('cortex_dispatch', {
       ]}
     }
 
-    const outcome = await runTask(args.task, config)
+    const outcome = await executeTask(args.task, config)
     if (outcome.kind === 'pointers') {
-      return { content: [{ type: 'text', text: renderPointerList(outcome.pointers, { targetKind: 'mcp' }) }] }
+      return { content: [{ type: 'text', text: renderPointerList(outcome.pointers) }] }
     }
     if (outcome.kind === 'refused') {
       return { content: [{ type: 'text', text: `budget refused dispatch: ${outcome.reason}` }], isError: true }
     }
 
     const { result } = outcome
-    const verdict = result.success ? 'PASS' : 'FAIL'
+    const verdict = result.accepted ? 'PASS' : 'FAIL'
+    const patch = result.finalOutput && isKind(result.finalOutput, 'patch') ? result.finalOutput.body.diff : ''
+    const reasoning = result.finalOutput && isKind(result.finalOutput, 'patch') ? result.finalOutput.body.reasoning : ''
     const output: string[] = [
       `Result: ${verdict}`,
       `Task: ${outcome.ucp.t}`,
-      `Iterations: ${result.iterations}`,
-      `Patch: ${result.patch ? `${result.patch.length} chars` : 'none'}`,
-      `Reasoning: ${result.reasoning || 'none'}`,
-      `Validation: ${result.validation.passed ? 'passed' : 'FAILED'}`,
+      `Iterations: ${result.state.iteration}`,
+      `Patch: ${patch ? `${patch.length} chars` : 'none'}`,
+      `Reasoning: ${reasoning || 'none'}`,
     ]
 
-    if (result.validation.errors.length > 0) {
-      for (const e of result.validation.errors) {
-        output.push(`  Error: ${e}`)
-      }
-    }
-
     return { content: [{ type: 'text', text: output.join('\n') }] }
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : String(e)
+    return { content: [{ type: 'text', text: `error: ${msg}` }], isError: true }
+  }
+})
+
+server.registerTool('cortex_exec', {
+  title: 'cortex-exec',
+  description: 'Blueprint execution: triage recommends a blueprint, skills run conditionally, produce steps run the CUEA closed loop with context-on-demand. Makes model calls. May return clarification questions instead of a result.',
+  inputSchema: {
+    ...taskSchema,
+    ...goalSchema,
+    ...dirSchema,
+    blueprint: z.string().optional().describe('Blueprint name (default: triage recommendation; built-ins: debug, feature, pr-review, default)'),
+    policies: z.string().optional().describe('Named policy set (default | strict | generous)'),
+    budget: z.number().optional().describe('Max input tokens (default: policy set budget)'),
+    timeout: z.number().optional().describe('Worker timeout in ms (default: policy set timeout)'),
+  },
+}, async (args) => {
+  try {
+    const projectRoot = resolveDir(args.dir)
+    const policies = args.policies ? getPolicySet(args.policies) : DEFAULT_POLICIES
+    if (!policies) {
+      return { content: [{ type: 'text', text: `error: unknown policy set "${args.policies}"` }], isError: true }
+    }
+    const config: BlueprintConfig = {
+      projectRoot,
+      policies,
+      raw: args.task,
+      ...(args.goal ? { goal: args.goal } : {}),
+      ...(args.blueprint ? { blueprint: args.blueprint } : {}),
+      ...(args.budget ? { budget: { ...DEFAULT_BUDGET, maxInputTokens: args.budget } } : {}),
+      ...(args.timeout ? { timeoutMs: args.timeout } : {}),
+    }
+    const outcome = await runBlueprint(args.task, config)
+    const text = renderBlueprintSummary({
+      taskId: outcome.artifacts[0]?.taskId ?? '',
+      blueprint: outcome.blueprint,
+      kind: outcome.kind,
+      accepted: outcome.kind === 'completed' ? outcome.accepted : false,
+      steps: outcome.steps,
+      questions: outcome.kind === 'clarification' ? outcome.questions : [],
+      artifacts: outcome.artifacts,
+      ...(outcome.kind === 'completed' && outcome.produce ? { produce: outcome.produce.summary } : {}),
+    }, { targetKind: 'mcp' })
+    return { content: [{ type: 'text', text }] }
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : String(e)
     return { content: [{ type: 'text', text: `error: ${msg}` }], isError: true }

@@ -80,7 +80,11 @@ function loadSpecsFromFile(filePath: string): WorkerSpec[] {
   let raw: string
   try {
     raw = fs.readFileSync(filePath, 'utf-8')
-  } catch {
+  } catch (e: unknown) {
+    // Overlay files are optional; only a present-but-unreadable file is news.
+    if ((e as NodeJS.ErrnoException).code !== 'ENOENT') {
+      warn(`worker registry: cannot read ${filePath} — ignoring overlay`)
+    }
     return []
   }
   let parsed: unknown

@@ -1,7 +1,7 @@
 import { test } from 'node:test'
 import * as assert from 'node:assert/strict'
 import { planDispatch } from '../src/capability/planner.js'
-import { DEFAULT_POLICY, checkPolicy, type Policy } from '../src/capability/policy.js'
+import { DEFAULT_CONSTRAINTS, checkConstraints, type PlannerConstraints } from '../src/capability/constraints.js'
 import { compileIntent } from '../src/capability/intent-compiler.js'
 import { type WorkerSpec, type WorkerRegistry } from '../src/worker/registry.js'
 import { type Capability } from '../src/capability/capabilities.js'
@@ -70,17 +70,16 @@ test('workers missing capabilities are excluded with a reason', () => {
 
 test('policy: patch intents require patch write access', () => {
   const readOnly = makeWorker({ id: 'reader', writeAccess: 'none' })
-  const verdict = checkPolicy(readOnly, compileIntent('fix bug in src/a.ts'), DEFAULT_POLICY)
+  const verdict = checkConstraints(readOnly, compileIntent('fix bug in src/a.ts'), DEFAULT_CONSTRAINTS)
   assert.equal(verdict.allowed, false)
 })
 
 test('policy: deny list and spend cap exclude workers', () => {
   const w = makeWorker({ id: 'expensive', cost: { inPer1k: 1000, outPer1k: 1000 } })
-  const denied: Policy = { ...DEFAULT_POLICY, denyWorkers: ['expensive'] }
-  assert.equal(checkPolicy(w, compileIntent('fix bug in src/a.ts'), denied).allowed, false)
+  const denied: PlannerConstraints = { ...DEFAULT_CONSTRAINTS, denyWorkers: ['expensive'] }
+  assert.equal(checkConstraints(w, compileIntent('fix bug in src/a.ts'), denied).allowed, false)
 
-  const capped: Policy = { ...DEFAULT_POLICY, maxSpendPerDispatch: 0.01 }
-  const plan = planDispatch(compileIntent('fix bug in src/a.ts'), makeRegistry([w]), capped)
+  const plan = planDispatch(compileIntent('fix bug in src/a.ts'), makeRegistry([w]), DEFAULT_CONSTRAINTS, undefined, undefined, undefined, 0.01)
   assert.equal(plan.ladder.length, 0)
   assert.ok(plan.excluded.some(e => e.reason.includes('spend')))
 })
@@ -92,7 +91,7 @@ test('reliability overrides shift utility ordering within a tier', () => {
   const plan = planDispatch(
     compileIntent('fix bug in src/a.ts, tests must pass'),
     makeRegistry([flaky, solid]),
-    DEFAULT_POLICY,
+    DEFAULT_CONSTRAINTS,
     overrides,
   )
   assert.equal(plan.ladder[0]!.worker.id, 'solid')

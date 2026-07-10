@@ -1,29 +1,18 @@
-// Dispatch planner: executes a DAG of packet dispatches — parallel where
-// dependencies allow, sequential where they don't — walking each node's
-// escalation ladder on recoverable failure. All execution is async; nothing
-// here knows what a worker is beyond its harness.
+// Single-packet dispatch. Escalation is handled by the CUEA loop;
+// dispatchOne is single-rung only. All execution is async; nothing here
+// knows what a worker is beyond its harness. (DAG execution deliberately
+// deferred — see docs/adr/0001-defer-dag-execution.md.)
 import { type UCP } from '../packet/ucp.js'
 import { type CodeChunk } from '../core/types.js'
-import { type Artifact, makeArtifact, isKind } from '../artifact/artifacts.js'
+import { type Artifact, isKind } from '../artifact/artifacts.js'
 import { type ScoredWorker } from '../capability/planner.js'
+import { type CompilerRuntime, DEFAULT_COMPILER_RUNTIME } from '../compiler/runtime.js'
 import { createHarness } from '../harness/harness.js'
 import { buildPrompt } from './prompt.js'
-import { parseWorkerOutput } from './output-parser.js'
+import { parseWorkerOutput } from './artifact-builder.js'
 import { type MetricRecord } from '../state/metrics.js'
 import { estimateTokens } from '../core/tokens.js'
-import { info, warn } from '../core/logger.js'
-
-export interface DispatchNode {
-  id: string
-  packet: UCP
-  chunks: CodeChunk[]
-  dependsOn: string[]
-}
-
-export interface DispatchPlan {
-  nodes: DispatchNode[]
-  concurrency: number
-}
+import { info } from '../core/logger.js'
 
 export interface NodeResult {
   nodeId: string
@@ -31,22 +20,15 @@ export interface NodeResult {
   artifact: Artifact
   latencyMs: number
   attempts: number
+  estInputTokens: number
+  estOutputTokens: number
 }
 
 export interface DispatchOptions {
   timeoutMs: number
   maxOutputBytes: number
   onMetric?: (record: MetricRecord) => void
-  // Fires once per node this run actually dispatched (not for synthetic
-  // dependency-failure or cancellation results) — the checkpointing seam.
-  onNodeComplete?: (result: NodeResult) => void
-  // Cancellation is cooperative and settles at node/rung boundaries: nothing
-  // new is launched after abort, but an in-flight harness call runs to
-  // completion (true mid-call abort needs harness support; deferred).
-  signal?: AbortSignal
-  // Resume/replay: nodes whose ids appear here are treated as already
-  // settled and are not re-executed (partial recomputation).
-  resumeFrom?: ReadonlyMap<string, NodeResult>
+  compilerRuntime?: CompilerRuntime
 }
 
 export const DEFAULT_DISPATCH_OPTIONS: DispatchOptions = {
@@ -54,198 +36,56 @@ export const DEFAULT_DISPATCH_OPTIONS: DispatchOptions = {
   maxOutputBytes: 10 * 1024 * 1024,
 }
 
-// Walk the escalation ladder for one packet: dispatch rung 0; escalate to the
-// next rung only on recoverable failure. Unrecoverable failures (IMPOSSIBLE,
-// oracle fail) stop the walk — a smarter model wouldn't fix a broken packet.
-export async function dispatchWithLadder(
+// Dispatch a single packet to one worker. Escalation is the CUEA loop's
+// responsibility — this function owns one-shot dispatch only.
+export async function dispatchOne(
   packet: UCP,
   chunks: CodeChunk[],
-  ladder: ScoredWorker[],
+  worker: ScoredWorker,
   options: DispatchOptions = DEFAULT_DISPATCH_OPTIONS,
 ): Promise<NodeResult> {
-  if (ladder.length === 0) {
+  const { makeArtifact } = options.compilerRuntime ?? DEFAULT_COMPILER_RUNTIME
+  const prompt = buildPrompt(packet, chunks)
+  const estInputTokens = estimateTokens(prompt)
+  const harness = createHarness(worker.worker.harness)
+
+  if (!harness.available()) {
     return {
       nodeId: packet.t,
-      workerId: 'kernel',
+      workerId: worker.worker.id,
       artifact: makeArtifact('failure', packet.t, 'kernel', {
-        reason: 'no feasible worker for this intent',
-        recoverable: false,
+        reason: `worker ${worker.worker.id} unavailable`,
+        recoverable: true,
       }),
       latencyMs: 0,
       attempts: 0,
-    }
-  }
-
-  const prompt = buildPrompt(packet, chunks)
-  const estInputTokens = estimateTokens(prompt)
-  let attempts = 0
-  let totalLatency = 0
-  let lastArtifact: Artifact | null = null
-  let lastWorkerId = ladder[0]!.worker.id
-
-  for (const rung of ladder) {
-    if (options.signal?.aborted) {
-      return {
-        nodeId: packet.t,
-        workerId: lastWorkerId,
-        artifact: makeArtifact('failure', packet.t, 'kernel', { reason: 'cancelled', recoverable: true }),
-        latencyMs: totalLatency,
-        attempts,
-      }
-    }
-    const worker = rung.worker
-    const harness = createHarness(worker.harness)
-
-    if (!harness.available()) {
-      warn(`dispatch: worker ${worker.id} unavailable, escalating`)
-      continue
-    }
-
-    attempts++
-    lastWorkerId = worker.id
-    info(`dispatch: ${packet.t} → ${worker.id} (tier ${worker.tier}, ${rung.justification})`)
-
-    const result = await harness.invoke({ prompt, timeoutMs: options.timeoutMs, maxOutputBytes: options.maxOutputBytes })
-    totalLatency += result.latencyMs
-
-    const artifact: Artifact = result.ok
-      ? parseWorkerOutput(result.output, packet, worker.id)
-      : makeArtifact('failure', packet.t, worker.id, { reason: result.failReason ?? 'harness failure', recoverable: true })
-
-    const failed = isKind(artifact, 'failure')
-    options.onMetric?.({
-      at: new Date().toISOString(),
-      taskId: packet.t,
-      workerId: worker.id,
-      tier: worker.tier,
-      act: packet.act,
-      ok: !failed,
-      latencyMs: result.latencyMs,
       estInputTokens,
-      estOutputTokens: estimateTokens(result.output),
-      iterations: attempts,
-      ...(failed ? { failReason: (artifact as Artifact<'failure'>).body.reason } : {}),
-    })
-
-    lastArtifact = artifact
-    if (!failed) {
-      return { nodeId: packet.t, workerId: worker.id, artifact, latencyMs: totalLatency, attempts }
-    }
-    if (!(artifact as Artifact<'failure'>).body.recoverable) {
-      break
-    }
-    warn(`dispatch: ${worker.id} failed (${(artifact as Artifact<'failure'>).body.reason}), escalating`)
-  }
-
-  return {
-    nodeId: packet.t,
-    workerId: lastWorkerId,
-    artifact: lastArtifact ?? makeArtifact('failure', packet.t, 'kernel', {
-      reason: 'all ladder workers unavailable',
-      recoverable: false,
-    }),
-    latencyMs: totalLatency,
-    attempts,
-  }
-}
-
-// Execute a DAG: nodes whose dependencies are settled run concurrently up to
-// the plan's concurrency bound. A failed node fails its dependents without
-// running them (fan-in short-circuit). `options.resumeFrom` seeds settled
-// nodes (replay skips them); `options.signal` cancels at node boundaries;
-// `options.onNodeComplete` fires per dispatched node for checkpointing.
-export async function executePlan(
-  plan: DispatchPlan,
-  ladderFor: (node: DispatchNode) => ScoredWorker[],
-  options: DispatchOptions = DEFAULT_DISPATCH_OPTIONS,
-): Promise<Map<string, NodeResult>> {
-  const results = new Map<string, NodeResult>()
-  const pending = new Map(plan.nodes.map(n => [n.id, n]))
-  const running = new Map<string, Promise<void>>()
-  const concurrency = Math.max(1, plan.concurrency)
-
-  if (options.resumeFrom) {
-    for (const [id, prior] of options.resumeFrom) {
-      if (pending.has(id)) {
-        results.set(id, prior)
-        pending.delete(id)
-        info(`dispatch: node ${id} restored from checkpoint, skipping`)
-      }
+      estOutputTokens: 0,
     }
   }
 
-  const isFailure = (r: NodeResult) => isKind(r.artifact, 'failure')
+  info(`dispatch: ${packet.t} → ${worker.worker.id} (tier ${worker.worker.tier}, ${worker.justification})`)
 
-  while (pending.size > 0 || running.size > 0) {
-    if (options.signal?.aborted && pending.size > 0) {
-      for (const [id, node] of pending) {
-        results.set(id, {
-          nodeId: id,
-          workerId: 'kernel',
-          artifact: makeArtifact('failure', node.packet.t, 'kernel', {
-            reason: 'cancelled',
-            recoverable: true,
-          }),
-          latencyMs: 0,
-          attempts: 0,
-        })
-      }
-      pending.clear()
-      warn(`dispatch: cancelled — ${running.size} in-flight node(s) draining`)
-    }
+  const result = await harness.invoke({ prompt, timeoutMs: options.timeoutMs, maxOutputBytes: options.maxOutputBytes })
+  const estOutputTokens = estimateTokens(result.output)
+  const artifact: Artifact = result.ok
+    ? parseWorkerOutput(result.output, packet, worker.worker.id)
+    : makeArtifact('failure', packet.t, worker.worker.id, { reason: result.failReason ?? 'harness failure', recoverable: true })
 
-    for (const [id, node] of pending) {
-      if (running.size >= concurrency) break
-      const deps = node.dependsOn.map(d => results.get(d))
-      if (node.dependsOn.some(d => !results.has(d) && pending.has(d))) continue
-      if (node.dependsOn.some(d => !results.has(d) && running.has(d))) continue
+  const failed = isKind(artifact, 'failure')
+  options.onMetric?.({
+    at: new Date().toISOString(),
+    taskId: packet.t,
+    workerId: worker.worker.id,
+    tier: worker.worker.tier,
+    act: packet.act,
+    ok: !failed,
+    latencyMs: result.latencyMs,
+    estInputTokens,
+    estOutputTokens,
+    iterations: 1,
+    ...(failed ? { failReason: (artifact as Artifact<'failure'>).body.reason } : {}),
+  })
 
-      pending.delete(id)
-
-      const failedDep = deps.find(d => d && isFailure(d))
-      if (failedDep || node.dependsOn.some(d => !results.has(d))) {
-        results.set(id, {
-          nodeId: id,
-          workerId: 'kernel',
-          artifact: makeArtifact('failure', node.packet.t, 'kernel', {
-            reason: `dependency ${failedDep?.nodeId ?? 'missing'} failed`,
-            recoverable: false,
-          }),
-          latencyMs: 0,
-          attempts: 0,
-        })
-        continue
-      }
-
-      const task = dispatchWithLadder(node.packet, node.chunks, ladderFor(node), options)
-        .then(r => {
-          const settled = { ...r, nodeId: id }
-          results.set(id, settled)
-          options.onNodeComplete?.(settled)
-        })
-        .finally(() => { running.delete(id) })
-      running.set(id, task)
-    }
-
-    if (running.size > 0) {
-      await Promise.race(running.values())
-    } else if (pending.size > 0) {
-      // Remaining nodes have unsatisfiable dependencies (cycle or bad id).
-      for (const [id, node] of pending) {
-        results.set(id, {
-          nodeId: id,
-          workerId: 'kernel',
-          artifact: makeArtifact('failure', node.packet.t, 'kernel', {
-            reason: 'unsatisfiable dependencies (cycle or unknown node id)',
-            recoverable: false,
-          }),
-          latencyMs: 0,
-          attempts: 0,
-        })
-      }
-      pending.clear()
-    }
-  }
-
-  return results
+  return { nodeId: packet.t, workerId: worker.worker.id, artifact, latencyMs: result.latencyMs, attempts: 1, estInputTokens, estOutputTokens }
 }

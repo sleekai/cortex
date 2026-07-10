@@ -79,24 +79,16 @@ export function generateWorkPacket(
   }
 }
 
-export function generateAskPacket(
-  taskId: string,
+// Judgment-channel packet (act: ask | review) derived from an existing work
+// packet: same task, goal, constraints, and context — new question and
+// output shape. The single constructor for both judgment dialects.
+export function generateJudgmentPacket(
+  base: UCP,
+  act: 'ask' | 'review',
   question: string,
-  constraints: string[],
-  pointers: string[],
-  facts: string[],
   out: PacketOut = 'decision',
 ): UCP {
-  return {
-    v: 2,
-    t: taskId,
-    act: 'ask',
-    g: compressGoal(question),
-    q: question,
-    c: constraints,
-    ctx: { f: pointers, d: facts.slice(0, MAX_FACTS) },
-    r: { out, format: 'json' },
-  }
+  return { ...base, act, q: question, r: { out, format: 'json' } }
 }
 
 // Error-only retry packet: context is never resent — only the failure evidence.

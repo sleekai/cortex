@@ -10,24 +10,32 @@ import './harness/cli-harness.js'
 import './harness/http-harness.js'
 
 import { DEFAULT_BUDGET, type BudgetConfig } from './core/types.js'
-import { info, error as logError } from './core/logger.js'
-import { compileIntent } from './capability/intent-compiler.js'
+import { info, warn, error as logError } from './core/logger.js'
 import { loadRegistry } from './worker/registry.js'
-import { compileContext } from './retrieval/context-compiler.js'
 import { buildPrompt } from './worker/prompt.js'
-import { planTask, prepareDispatch, runTask } from './kernel/kernel.js'
+import { planTask, prepareDispatch, executeTask, runBlueprint, runLocate, listWorkers, triagedTask, type ExecuteConfig, type BlueprintConfig } from './kernel/index.js'
+import { registeredBlueprints } from './blueprint/blueprint.js'
+import { registeredSkills } from './skill/registry.js'
+import { getPolicySet, DEFAULT_POLICIES } from './policy/policies.js'
+import { renderBlueprintSummary } from './egress/egress.js'
+import { DEFAULT_BOUNDS, type RouterBounds } from './loop/router.js'
+import { isKind } from './artifact/artifacts.js'
 import { initProject } from './state/store.js'
 import { readMetrics, aggregateStats } from './state/metrics.js'
-import { createHarness } from './harness/harness.js'
-import { TEMPLATES, type TemplateKind, openAiTemplate, anthropicTemplate, chatGptTemplate, ollamaTemplate, cliTemplate, httpTemplate, opencodeAdapter, claudeCliAdapter } from './worker/templates.js'
+import { TEMPLATES, type TemplateKind, openAiTemplate, anthropicTemplate, chatGptTemplate, ollamaTemplate, cliTemplate, httpTemplate, opencodeAdapter, codexAdapter, cursorAdapter, claudeCliAdapter } from './worker/templates.js'
 import { type WorkerSpec } from './worker/registry.js'
 import { normalizeInput as ingressNormalize } from './ingress/ingress.js'
-import { renderDispatchSummary, renderPlanSummary, renderPointerList } from './egress/egress.js'
+import { renderDispatchSummary, renderLoopSummary, renderPlanSummary, renderPointerList } from './egress/egress.js'
+// Triage Skill System (CTS) — opt-in pre-execution cognitive filter. The
+// side-effect import registers the built-in skills; runTriage is only called
+// when --triage / CORTEX_TRIAGE is set, so the pipeline is inert by default.
+import './triage/stages/builtins.js'
+import { runTriage } from './triage/pipeline.js'
 import * as fs from 'node:fs'
 import * as path from 'node:path'
 
 interface CliArgs {
-  command: 'run' | 'dispatch' | 'plan' | 'locate' | 'workers' | 'metrics' | 'init' | 'add-worker'
+  command: 'run' | 'dispatch' | 'loop' | 'exec' | 'plan' | 'locate' | 'workers' | 'metrics' | 'init' | 'add-worker' | 'blueprints' | 'skills'
   task: string
   goal?: string
   dir?: string
@@ -35,6 +43,10 @@ interface CliArgs {
   budget?: string
   timeout?: string
   dryRun?: boolean
+  // loop (CUEA) bounds
+  maxIter?: string
+  maxEscalation?: string
+  maxCost?: string
   // add-worker specific
   provider?: string
   workerId?: string
@@ -43,9 +55,13 @@ interface CliArgs {
   baseUrl?: string
   bin?: string
   writeAccess?: string
+  triage?: boolean
+  // exec (blueprint) specific
+  blueprint?: string
+  policies?: string
 }
 
-const COMMANDS = new Set(['run', 'dispatch', 'plan', 'locate', 'workers', 'metrics', 'init', 'add-worker'])
+const COMMANDS = new Set(['run', 'dispatch', 'loop', 'exec', 'plan', 'locate', 'workers', 'metrics', 'init', 'add-worker', 'blueprints', 'skills'])
 
 const COMMAND_ALIASES: Record<string, CliArgs['command']> = {
   run: 'dispatch',
@@ -74,8 +90,20 @@ function parseArgs(raw: string[]): CliArgs {
       args.budget = raw[++i]!
     } else if (arg === '--timeout' && i + 1 < raw.length) {
       args.timeout = raw[++i]!
+    } else if (arg === '--max-iter' && i + 1 < raw.length) {
+      args.maxIter = raw[++i]!
+    } else if (arg === '--max-escalation' && i + 1 < raw.length) {
+      args.maxEscalation = raw[++i]!
+    } else if (arg === '--max-cost' && i + 1 < raw.length) {
+      args.maxCost = raw[++i]!
+    } else if (arg === '--blueprint' && i + 1 < raw.length) {
+      args.blueprint = raw[++i]!
+    } else if (arg === '--policies' && i + 1 < raw.length) {
+      args.policies = raw[++i]!
     } else if (arg === '--dry-run') {
       args.dryRun = true
+    } else if (arg === '--triage') {
+      args.triage = true
     } else if ((arg === '--provider' || arg === '-p') && i + 1 < raw.length) {
       args.provider = raw[++i]!
     } else if ((arg === '--id' || arg === '-n') && i + 1 < raw.length) {
@@ -106,6 +134,10 @@ function printHelp(): void {
 Usage:
   cortex init [options]              scaffold .cortex/ state directory
   cortex dispatch|run <task> [opts]  dispatch a task (run is alias)
+  cortex loop <task> [options]       CUEA closed loop: Producer→Evaluator→Router
+  cortex exec <task> [options]       blueprint execution: triage → skills → closed loop
+  cortex blueprints                  list registered execution blueprints
+  cortex skills                      list registered execution skills
   cortex plan <task> [options]       print intent + dispatch plan, no model call
   cortex locate <keywords> [options] tier-0 deterministic pointers, no model call
   cortex workers [options]           list registered workers + availability
@@ -125,7 +157,13 @@ Options:
   --budget       Max input tokens (default: ${DEFAULT_BUDGET.maxInputTokens})
   --timeout      Worker timeout in ms (default: 180000)
   --dry-run      Print packet + prompt and exit (no model call, no patch)
-  --provider,-p  Worker template (openai, anthropic, ollama, cli, http)
+  --max-iter        Loop: max iterations (default: ${DEFAULT_BOUNDS.maxIterations})
+  --max-escalation  Loop: max escalation depth (default: ${DEFAULT_BOUNDS.maxEscalationDepth})
+  --max-cost        Loop: cost ceiling in relative units (default: uncapped)
+  --blueprint    Exec: blueprint name (default: triage's recommendation)
+  --policies     Exec: named policy set (default|strict|generous)
+  --triage       Run the Triage Skill System first (env: CORTEX_TRIAGE)
+  --provider,-p  Worker template (openai, anthropic, chatgpt, ollama, cli, http)
   --id,-n        Worker id (default: derived from provider)
   --model        Model name (for openai/anthropic/ollama templates)
   --api-key,-k   API key (for openai/anthropic templates; falls back to env)
@@ -137,6 +175,8 @@ Options:
 Examples:
   cortex init
   cortex dispatch "add JWT auth middleware to Express app"
+  cortex loop "refactor the parser" --max-iter 5 --max-escalation 2
+  cortex exec "fix the login crash" --blueprint debug --policies generous
   cortex plan --task "fix login form validation" --dir ./my-app
   cortex locate "budget enforcement" --dir .
   cortex add-worker openai --model gpt-4o-mini --id openai-cheap
@@ -144,6 +184,12 @@ Examples:
   cortex add-worker ollama --model llama3.2 --base-url http://192.168.1.5:11434
   cortex add-worker cli --id my-llamafile --bin ./llamafile --promptVia arg
 `)
+}
+
+// Opt-in CTS seam. Triage itself runs inside the kernel (once per task) when
+// the flag is on; the CLI only decides the flag.
+function triageEnabled(args: CliArgs): boolean {
+  return args.triage === true || !!process.env['CORTEX_TRIAGE']
 }
 
 async function commandRun(args: CliArgs): Promise<void> {
@@ -160,7 +206,7 @@ async function commandRun(args: CliArgs): Promise<void> {
     metadata: { projectRoot, budget: String(budget), timeout: String(timeout) },
   })
   const goal = ingressPacket.ucp.g
-  const config = { projectRoot, goal, budget: budgetConfig, timeoutMs: timeout }
+  const config = { projectRoot, goal, budget: budgetConfig, timeoutMs: timeout, triage: triageEnabled(args) }
 
   info(`project: ${projectRoot}`)
   info(`task: ${args.task}`)
@@ -168,7 +214,8 @@ async function commandRun(args: CliArgs): Promise<void> {
   info(`source: ${ingressPacket.source} session=${ingressPacket.sessionId ?? 'none'}`)
 
   if (args.dryRun) {
-    const prepared = prepareDispatch(args.task, config)
+    const triaged = triagedTask(args.task, config)
+    const prepared = prepareDispatch(triaged.task, config, triaged.tierHint)
     if (prepared.kind === 'pointers') {
       process.stdout.write(prepared.pointers.join('\n') + '\n')
       return
@@ -184,37 +231,176 @@ async function commandRun(args: CliArgs): Promise<void> {
     return
   }
 
-  const outcome = await runTask(args.task, config)
+  const outcome = await executeTask(args.task, config)
   if (outcome.kind === 'pointers') {
-    process.stdout.write(renderPointerList(outcome.pointers, { targetKind: 'cli' }) + '\n')
+    process.stdout.write(renderPointerList(outcome.pointers) + '\n')
     return
   }
   if (outcome.kind === 'refused') {
     logError(`budget refused dispatch: ${outcome.reason}`)
     process.exit(1)
   }
+
+  const { result } = outcome
+  const patch = result.finalOutput && isKind(result.finalOutput, 'patch') ? result.finalOutput.body.diff : ''
+  const reasoning = result.finalOutput && isKind(result.finalOutput, 'patch') ? result.finalOutput.body.reasoning : ''
   const summary = {
     kind: outcome.kind,
     taskId: outcome.ucp.t,
     goal: outcome.ucp.g,
-    success: outcome.result.success,
-    iterations: outcome.result.iterations,
-    patchLength: outcome.result.patch.length,
-    reasoning: outcome.result.reasoning || 'none',
-    validationPassed: outcome.result.validation.passed,
-    validationErrors: outcome.result.validation.errors,
+    success: result.accepted,
+    iterations: result.state.iteration,
+    patchLength: patch.length,
+    reasoning: reasoning || 'none',
+    validationPassed: result.accepted,
+    validationErrors: [] as string[],
   }
   const egressOut = renderDispatchSummary(summary, { targetKind: 'cli' })
   process.stdout.write(egressOut)
-  if (!outcome.result.success) {
+  if (!result.accepted) {
     process.exit(1)
+  }
+}
+
+// Build RouterBounds from flags, falling back to DEFAULT_BOUNDS per field so a
+// partial override (just --max-iter, say) keeps the other guarantees intact.
+function boundsFromFlags(args: CliArgs): RouterBounds {
+  return {
+    ...DEFAULT_BOUNDS,
+    ...(args.maxIter ? { maxIterations: parseInt(args.maxIter, 10) } : {}),
+    ...(args.maxEscalation ? { maxEscalationDepth: parseInt(args.maxEscalation, 10) } : {}),
+    ...(args.maxCost ? { maxCost: parseFloat(args.maxCost) } : {}),
+  }
+}
+
+// `cortex loop` — the CUEA closed-loop executor. Same ingress/plan/budget path
+// as dispatch, but the Router owns every continuation decision under the §6
+// bounds instead of the fixed 3-iteration validation loop.
+async function commandLoop(args: CliArgs): Promise<void> {
+  if (args.stateDir) process.env['CORTEX_DIR'] = args.stateDir
+  const projectRoot = args.dir ?? process.cwd()
+  const budget = args.budget ? parseInt(args.budget, 10) : DEFAULT_BUDGET.maxInputTokens
+  const timeout = args.timeout ? parseInt(args.timeout, 10) : 180_000
+  const budgetConfig: BudgetConfig = { ...DEFAULT_BUDGET, maxInputTokens: budget }
+
+  const ingressPacket = ingressNormalize({
+    content: args.task,
+    kind: 'cli',
+    explicitGoal: args.goal,
+    metadata: { projectRoot, budget: String(budget), timeout: String(timeout) },
+  })
+  const goal = ingressPacket.ucp.g
+  const bounds = boundsFromFlags(args)
+  const config: ExecuteConfig = { projectRoot, goal, budget: budgetConfig, timeoutMs: timeout, bounds, triage: triageEnabled(args) }
+
+  info(`project: ${projectRoot}`)
+  info(`task: ${args.task}`)
+  info(`bounds: maxIter=${bounds.maxIterations} maxEscalation=${bounds.maxEscalationDepth} maxCost=${bounds.maxCost}`)
+
+  const outcome = await executeTask(args.task, config)
+  if (outcome.kind === 'pointers') {
+    process.stdout.write(renderPointerList(outcome.pointers) + '\n')
+    return
+  }
+  if (outcome.kind === 'refused') {
+    logError(`budget refused dispatch: ${outcome.reason}`)
+    process.exit(1)
+  }
+
+  const { result } = outcome
+  const final = result.finalOutput
+  const patch = final && isKind(final, 'patch') ? final.body : { diff: '', reasoning: '' }
+  const lastIssues = result.state.history[result.state.history.length - 1]?.issues ?? []
+  const egressOut = renderLoopSummary({
+    taskId: outcome.ucp.t,
+    goal: outcome.ucp.g,
+    status: result.state.status,
+    accepted: result.accepted,
+    iterations: result.state.iteration,
+    escalationDepth: result.state.escalationDepth,
+    cost: result.state.cost,
+    terminationReason: result.terminationReason,
+    workerPath: result.state.history.map(h => `${h.workerId} (tier ${h.tier}) → ${h.decision} @conf ${h.confidence.toFixed(2)}`),
+    finalReasoning: patch.reasoning,
+    patchLength: patch.diff.length,
+    issues: lastIssues,
+  }, { targetKind: 'cli' })
+  process.stdout.write(egressOut)
+  if (!result.accepted) {
+    process.exit(1)
+  }
+}
+
+// `cortex exec` — blueprint execution (the MVP flow): ingress → triage skill
+// recommends a blueprint → runner executes skills conditionally → produce
+// runs the CUEA loop with context-on-demand → artifacts out through egress.
+async function commandExec(args: CliArgs): Promise<void> {
+  if (args.stateDir) process.env['CORTEX_DIR'] = args.stateDir
+  const projectRoot = args.dir ?? process.cwd()
+  const budget = args.budget ? parseInt(args.budget, 10) : DEFAULT_BUDGET.maxInputTokens
+  const timeout = args.timeout ? parseInt(args.timeout, 10) : 180_000
+  const budgetConfig: BudgetConfig = { ...DEFAULT_BUDGET, maxInputTokens: budget }
+
+  const policies = args.policies ? getPolicySet(args.policies) : DEFAULT_POLICIES
+  if (!policies) {
+    logError(`unknown policy set "${args.policies}"`)
+    process.exit(1)
+  }
+
+  const config: BlueprintConfig = {
+    projectRoot,
+    budget: budgetConfig,
+    timeoutMs: timeout,
+    policies,
+    raw: args.task,
+    ...(args.goal ? { goal: args.goal } : {}),
+    ...(args.blueprint ? { blueprint: args.blueprint } : {}),
+  }
+
+  info(`project: ${projectRoot}`)
+  info(`task: ${args.task}`)
+
+  const outcome = await runBlueprint(args.task, config)
+  const summary = renderBlueprintSummary({
+    taskId: outcome.artifacts[0]?.taskId ?? '',
+    blueprint: outcome.blueprint,
+    kind: outcome.kind,
+    accepted: outcome.kind === 'completed' ? outcome.accepted : false,
+    steps: outcome.steps,
+    questions: outcome.kind === 'clarification' ? outcome.questions : [],
+    artifacts: outcome.artifacts,
+    ...(outcome.kind === 'completed' && outcome.produce ? { produce: outcome.produce.summary } : {}),
+  }, { targetKind: 'cli' })
+  process.stdout.write(summary)
+
+  if (outcome.kind === 'clarification') {
+    process.exit(2)
+  }
+  if (!outcome.accepted) {
+    process.exit(1)
+  }
+}
+
+function commandBlueprints(): void {
+  for (const bp of registeredBlueprints()) {
+    const steps = bp.steps.map(s => s.kind === 'skill' ? s.skill : 'produce').join(' → ')
+    process.stdout.write(`${bp.name}: ${bp.description}\n  steps: ${steps}\n`)
+  }
+}
+
+function commandSkills(): void {
+  for (const s of registeredSkills()) {
+    const caps = s.meta.profile.minimum.map(r => r.capability).join(',')
+    process.stdout.write(`${s.name} [${s.meta.costLevel}${s.meta.deterministic ? ', deterministic' : ''}]: ${s.purpose}\n  caps: ${caps}\n  produces: ${s.meta.produces.join(', ')}\n`)
   }
 }
 
 function commandPlan(args: CliArgs): void {
   const projectRoot = args.dir ?? process.cwd()
   const ingressPacket = ingressNormalize({ content: args.task, kind: 'cli', explicitGoal: args.goal })
-  const { plan, intent } = planTask(args.task, projectRoot)
+  const cts = triageEnabled(args) ? runTriage(ingressPacket) : undefined
+  const task = cts?.normalized_task ?? args.task
+  const { plan, intent } = planTask(task, projectRoot, undefined, undefined, cts?.worker_recommendation)
   const data = {
     intent,
     entryTier: plan.entryTier,
@@ -232,6 +418,7 @@ function commandPlan(args: CliArgs): void {
       sessionId: ingressPacket.sessionId,
       preClassified: ingressPacket.preClassified,
     },
+    ...(cts ? { _triage: cts } : {}),
   }
   process.stdout.write(renderPlanSummary(data, { targetKind: 'cli' }) + '\n')
 }
@@ -239,26 +426,17 @@ function commandPlan(args: CliArgs): void {
 function commandLocate(args: CliArgs): void {
   const projectRoot = args.dir ?? process.cwd()
   const ingressPacket = ingressNormalize({ content: args.task, kind: 'cli', explicitGoal: args.goal })
-  const intent = { ...compileIntent(args.task), taskType: 'locate' as const }
-  const context = compileContext(projectRoot, ingressPacket.ucp.g, intent, DEFAULT_BUDGET)
-  process.stdout.write(renderPointerList(context.pointers, { targetKind: 'cli' }) + '\n')
+  const pointers = runLocate(args.task, projectRoot, ingressPacket.ucp.g)
+  process.stdout.write(renderPointerList(pointers) + '\n')
 }
 
 function commandWorkers(args: CliArgs): void {
   const projectRoot = args.dir ?? process.cwd()
-  const registry = loadRegistry(projectRoot)
-  const stats = aggregateStats(readMetrics(projectRoot))
-  for (const w of registry.workers) {
-    let availability = 'unknown'
-    try {
-      availability = createHarness(w.harness).available() ? 'available' : 'UNAVAILABLE'
-    } catch (e: unknown) {
-      availability = `error: ${e instanceof Error ? e.message : String(e)}`
-    }
-    const s = stats.get(w.id)
-    const observed = s ? ` observed: ${(s.successRate * 100).toFixed(0)}% over ${s.dispatches} dispatches` : ''
+  for (const w of listWorkers(projectRoot)) {
+    const availability = w.availableError ?? (w.available ? 'available' : 'UNAVAILABLE')
+    const observed = w.dispatches ? ` observed: ${((w.successRate ?? 0) * 100).toFixed(0)}% over ${w.dispatches} dispatches` : ''
     process.stdout.write(
-      `${w.id}  tier=${w.tier}  caps=${w.capabilities.join(',')}  harness=${w.harness.kind}  ${availability}${observed}\n`,
+      `${w.id}  tier=${w.tier}  caps=${w.capabilities.join(',')}  harness=${w.harnessKind}  ${availability}${observed}\n`,
     )
   }
 }
@@ -387,8 +565,12 @@ async function writeWorkerSpec(spec: WorkerSpec, projectRoot: string): Promise<v
   try {
     const raw = fs.readFileSync(filePath, 'utf-8')
     existing = JSON.parse(raw)
-  } catch {
-    // file doesn't exist yet — start fresh
+  } catch (e: unknown) {
+    // A missing file starts fresh; a malformed one is about to be
+    // overwritten — say so instead of silently discarding it.
+    if ((e as NodeJS.ErrnoException).code !== 'ENOENT') {
+      warn(`workers.json at ${filePath} is unreadable or malformed — rewriting it`)
+    }
   }
   if (!Array.isArray(existing.workers)) existing.workers = []
 
@@ -435,12 +617,22 @@ function buildSpecFromFlags(args: CliArgs): WorkerSpec {
       })
     case 'opencode':
       return opencodeAdapter({
-        id: workerId, model: args.model,
+        id: workerId,
+        writeAccess: (args.writeAccess as 'none' | 'patch') ?? 'patch',
+      })
+    case 'codex':
+      return codexAdapter({
+        id: workerId,
+        writeAccess: (args.writeAccess as 'none' | 'patch') ?? 'patch',
+      })
+    case 'cursor':
+      return cursorAdapter({
+        id: workerId,
         writeAccess: (args.writeAccess as 'none' | 'patch') ?? 'patch',
       })
     case 'claude-cli':
       return claudeCliAdapter({
-        id: workerId, model: args.model,
+        id: workerId,
         writeAccess: (args.writeAccess as 'none' | 'patch') ?? 'patch',
       })
     case 'cli':
@@ -490,14 +682,24 @@ async function commandAddWorker(args: CliArgs): Promise<void> {
         process.stdout.write('\n── opencode adapter ────────────────────────────\n')
         spec = opencodeAdapter({
           id: await ask(rli, 'Worker id', 'opencode'),
-          model: await ask(rli, 'Model/provider (leave empty for default)', '') || undefined,
+        })
+        break
+      case 'codex':
+        process.stdout.write('\n── codex adapter ───────────────────────────────\n')
+        spec = codexAdapter({
+          id: await ask(rli, 'Worker id', 'codex'),
+        })
+        break
+      case 'cursor':
+        process.stdout.write('\n── cursor adapter ──────────────────────────────\n')
+        spec = cursorAdapter({
+          id: await ask(rli, 'Worker id', 'cursor'),
         })
         break
       case 'claude-cli':
         process.stdout.write('\n── claude-cli adapter ───────────────────────────\n')
         spec = claudeCliAdapter({
           id: await ask(rli, 'Worker id', 'claude-cli'),
-          model: await ask(rli, 'Model (leave empty for default)', '') || undefined,
         })
         break
       case 'openai': spec = await promptOpenAi(rli); break
@@ -525,19 +727,24 @@ async function commandAddWorker(args: CliArgs): Promise<void> {
 async function main(): Promise<void> {
   const args = parseArgs(process.argv)
 
-  if (args.command !== 'workers' && args.command !== 'metrics' && args.command !== 'init' && args.command !== 'add-worker' && !args.task) {
+  const taskless = new Set(['workers', 'metrics', 'init', 'add-worker', 'blueprints', 'skills'])
+  if (!taskless.has(args.command) && !args.task) {
     printHelp()
     process.exit(1)
   }
 
   switch (args.command) {
     case 'dispatch': return commandRun(args)
+    case 'loop': return commandLoop(args)
+    case 'exec': return commandExec(args)
     case 'plan': return commandPlan(args)
     case 'locate': return commandLocate(args)
     case 'workers': return commandWorkers(args)
     case 'metrics': return commandMetrics(args)
     case 'init': return commandInit(args)
     case 'add-worker': return commandAddWorker(args)
+    case 'blueprints': return commandBlueprints()
+    case 'skills': return commandSkills()
   }
 }
 

@@ -10,15 +10,16 @@ This plan follows the audit in `docs/AUDIT.md`. Guiding rule from the audit:
 validation loop, and stateless one-shot discipline survive intact; everything
 implicit becomes explicit and typed.
 
-Status (2026-07): phases 1–5 below are implemented and tested. The kernel is
-extracted (`src/kernel/kernel.ts`); the DAG executor supports checkpointing,
-resume, and cooperative cancellation. A state-graph layer (`src/graph/`) adds
-dynamic control flow above dispatch — reducer channels, conditional routing,
-Send fan-out, bounded cycles, interrupt/resume — adopting LangGraph's proven
-ideas without its dependencies (see "State graph" below). `docs/AUDIT.md` §4
-records what is deliberately deferred and why (call/dependency-graph
-retrieval, embeddings, additional protocol harnesses, a persistent repository
-index).
+Status (2026-07): phases 1–7 below are implemented and tested — the
+original 5-phase plan plus the CUEA closed-loop execution engine and the MVP
+execution model (skills, blueprints, policy sets). The kernel is extracted
+(`src/kernel/`: `kernel.ts`, `dispatch-orchestrator.ts`,
+`blueprint-orchestrator.ts`). The CUEA loop (`src/loop/`) wraps the
+Producer→Evaluator→Router cycle around the same prepared dispatch pipeline,
+handing every continuation decision to the Router under explicit bounds (see
+"CUEA execution loop" below). `docs/AUDIT.md` §4 records what is deliberately
+deferred and why (call/dependency-graph retrieval, embeddings, additional
+protocol harnesses, a persistent repository index).
 
 ## Deviations from the vNext specification (deliberate)
 
@@ -44,46 +45,77 @@ The spec invites improvement where a superior design exists. Three deviations:
 ## Module map
 
 ```
-skills/ucp-toolchain/implementation/   (package: cortex)
+cortex   (package: @sleekai/cortex)
   src/
     kernel/
-      kernel.ts         the one pipeline: planTask | prepareDispatch | runTask;
-                        CLI and MCP server are thin surfaces over it
+      kernel.ts               planTask, prepareDispatch, runLocate, listWorkers
+      dispatch-orchestrator.ts  executeTask, executePrepared, triagedTask
+      blueprint-orchestrator.ts runBlueprint
+      index.ts                barrel — re-exports from all kernel submodules
     core/
-      types.ts          shared primitives (chunks, budgets) — extended, kept
+      types.ts          shared primitives (chunks, budgets)
       logger.ts         kept
       tokens.ts         single token-estimation source (dedup of 2 copies)
+      signals.ts        shared signal tables (FILE_PATTERN, OPEN/TRIVIAL_SIGNALS,
+                        classifyComplexity, extractFileTokens)
+    skill/
+      skill.ts          generic Skill contract: applicable/execute/observations
+      registry.ts       execution-skill registry (pluggability seam)
+      builtins.ts       triage, grilling, summarize, review skills
+    blueprint/
+      blueprint.ts      Blueprint types + registry (workflows as data)
+      builtins.ts       debug, feature, pr-review, default blueprints
+      runner.ts         step executor: skills conditionally, produce = CUEA loop
+    policy/
+      policies.ts       PolicySet (retry/escalation/clarification/context/
+                        budget/timeout) + named-set registry; Router bounds
+                        are a projection of a policy set
+    compiler/
+      runtime.ts        Intent/Context/Artifact compiler facade, replaceable
+    loop/
+      execution-state.ts  ExecutionState record + pure reducers
+      evaluator.ts      pure EvaluatorInput → Evaluation
+      router.ts         pure state+eval → RouterAction; all termination
+                        guarantees (bounds, convergence) live here
+      loop-engine.ts    bounded Producer→Evaluator→Router while-loop;
+                        ladderProducer dispatches one rung per loop body
+      context-service.ts ContextService interface + defaultContextService factory
     artifact/
       artifacts.ts      typed Artifact union + guards + (de)serialization
     packet/
       ucp.ts            UCP v2: versioned, both dialects (work + judgment)
       generator.ts      evolved from ucp/generator.ts
-      budget-controller.ts  evolved; adds spend/retry estimation
+      budget-controller.ts  degrade cascade + spend/retry estimation
     capability/
       capabilities.ts   Capability vocabulary + TaskIntent types
       intent-compiler.ts  deterministic request → structured intent
       planner.ts        expected-utility worker selection + escalation ladder
-      policy.ts         hard constraints (write-access, spend caps, deny-lists)
+      constraints.ts    hard planner constraints (write-access, deny-lists only)
     worker/
       registry.ts       WorkerSpec registry: load, validate, query by capability
       registry.default.json   built-in workers (claude CLI as the first entry)
       dispatch.ts       dispatch planner: sequential / parallel / fan-out, retry
+      artifact-builder.ts parse-once boundary: raw output → typed Artifacts
+      diff-extractor.ts  diff extraction from raw harness output
+      json-extractor.ts  JSON extraction from oracle replies
+      prompt.ts         system/user prompt templates per capability
+      templates.ts      worker-specific template helpers
     harness/
       harness.ts        Harness interface + registry of harness factories
       cli-harness.ts    generic process harness (claude-adapter generalized)
       http-harness.ts   generic JSON-over-HTTP harness
-    graph/
-      channels.ts       reducer channels: shared state with declared merge semantics
-      state-graph.ts    graph builder: nodes, edges, routers, Send, goto
-      executor.ts       superstep executor: cycles, interrupts, checkpoints
-      packet-node.ts    bridge: dispatchWithLadder as a graph node
-    retrieval/          kept: ast-parser, embedder (TF-IDF), git-priority
-      context-compiler.ts  progressive levels over the existing retrieval
-    validator/          kept: patch-apply, validation-loop (worker-agnostic now)
+    retrieval/
+      ast-parser.ts     identifier token extraction from source
+      embedder.ts       TF-IDF ranker over identifier tokens (zero neural)
+      git-priority.ts   git-recency boost for retrieval ordering
+      context-compiler.ts  progressive levels L0–L4 over the retrieval engine
+    validator/
+      patch-apply.ts    apply patches to working tree
     state/
       store.ts          .cortex/ state engine: decisions, artifacts index
       metrics.ts        append-only JSONL metrics + aggregation (learning)
     index.ts            CLI: run | plan | locate | workers | metrics
+    mcp-server.ts       MCP stdio server: surfaces kernel as MCP tools
   test/                 node:test suites per subsystem
 ```
 
@@ -194,7 +226,12 @@ EU(worker) = quality(worker, caps) × reliability(worker)
 ```
 
 subject to: capability coverage, context-window fit, `writeAccess` policy,
-spend caps, tier ≥ ladder entry point. The **ladder** is: tier 0 deterministic
+spend caps (from `BudgetConfig.maxSpend`, consolidated into `policies.ts` via
+`PolicySet.budget.maxCost`), tier ≥ ladder entry point. `PlannerConstraints`
+in `capability/constraints.ts` (renamed from `Policy` — "policy" now refers
+solely to the execution-lifecycle `PolicySet`) handles only worker deny-lists
+and write access enforcement — spend limits moved to `BudgetConfig` in
+`core/types.ts` and passed directly to the planner. The **ladder** is: tier 0 deterministic
 (retrieval/AST — answers `locate`-shaped intents with zero model calls) →
 tier 1 small/local → tier 2 mid → tier 3 premium reasoning. Entry point comes
 from `TaskIntent.complexity`; escalation to the next rung happens only on
@@ -227,57 +264,85 @@ packet is compressed, split (fan-out via dispatch planner), or refused with a
 
 ### Dispatch planner (`worker/dispatch.ts`)
 
-Executes a `DispatchPlan` of nodes `{ packet, workerId, dependsOn[] }`:
-independent nodes run in parallel (`Promise.all` over async harness calls,
-bounded concurrency), dependents sequence, failures trigger per-node retry
-policy (error-only retry packet, unchanged semantics) then ladder escalation.
+Single-packet dispatch (`dispatchOne`): build prompt, invoke harness, parse
+output once at the harness boundary into a typed artifact, emit a metric
+record. Escalation and retry are the CUEA loop's responsibility.
 
-Checkpointing and replay: `executePlan` accepts `resumeFrom` (settled nodes
-are restored without re-dispatch — partial recomputation), `onNodeComplete`
-(fires per dispatched node; wire it to `saveRunCheckpoint`), and an
-`AbortSignal` for cooperative cancellation — nothing launches after abort,
-in-flight harness calls drain, and cancelled nodes settle as *recoverable*
-failures so a resume re-runs them. True mid-call abort would need harness
-support and is deferred until a harness can honor it.
+DAG execution (parallel nodes, checkpoint/resume, cooperative cancellation)
+is deliberately deferred until a real fan-out consumer exists — see
+`docs/adr/0001-defer-dag-execution.md`.
 
-### State graph (`graph/`)
+### CUEA execution loop (`loop/`)
 
-Dynamic control flow above the dispatch planner, adopted from LangGraph's
-good parts and rebuilt Cortex-idiomatic (deterministic, zero dependencies,
-artifact-first):
+A closed-loop execution engine (Cortex Unified Execution Architecture): a
+**Producer → Evaluator → Router** cycle that iteratively refines, escalates, or
+terminates on evaluation feedback (spec §3–§5). Where the validation loop
+(`validator/validation-loop.ts`) delegates escalation to `dispatchWithLadder`'s
+internal walk inside a fixed 3-iteration cap, the CUEA loop hands **every**
+continuation decision to the Router under explicit bounds (§6).
 
-- **Reducer channels** (`channels.ts`) — shared state as declared channels,
-  each with a merge reducer (`lastValue`, `appendList`, `mapMerge`, custom).
-  Parallel nodes never race: the executor applies their updates through the
-  reducers in node-id-sorted order, so runs are reproducible regardless of
-  completion timing. Channel values must stay JSON-serializable.
-- **State graph builder** (`state-graph.ts`) — `stateGraph(channels)
-  .addNode().addEdge().addConditionalEdges().compile()`. Conditional routers
-  inspect merged state at runtime; a node may override its outgoing edges per
-  run (Command-style `goto`); `send(node, input)` schedules dynamic fan-out —
-  one task per payload, map-reduce with a reducer channel as the join. Cycles
-  are legal.
-- **Superstep executor** (`executor.ts`) — Pregel-style: run the frontier
-  concurrently (bounded), merge updates, route the next frontier. A
-  checkpoint (`{ step, state, frontier, interrupted }`) is snapshotted before
-  every superstep, so `failed`, `cancelled`, `exhausted` (recursion limit,
-  default 25 supersteps), and `interrupted` outcomes all carry a resumable
-  snapshot — time travel is resuming from an earlier one. `interrupt` is the
-  human-in-the-loop seam: the node pauses the run (peers still settle),
-  `resumeGraph(graph, checkpoint, value)` re-runs it with `ctx.resume` set.
-  `onEvent` streams superstep/node lifecycle; `onCheckpoint` is the
-  persistence seam (wire to `state/store`).
-- **Packet bridge** (`packet-node.ts`) — `packetNode()` wraps
-  `dispatchWithLadder` as a graph node (escalation, metrics, and artifact
-  parsing unchanged); `packetChannels()` provides the `artifacts` append
-  channel and `results` map channel. One dispatch implementation, two
-  frontends: static `DispatchPlan`s keep using `executePlan`; graphs that
-  need runtime routing, loops, fan-out, or human gates use the state graph.
+- **Execution state** (`execution-state.ts`) — the mandated record
+  `{ iteration, cost, escalationDepth, history, currentOutput, status }`.
+  Data only; every transition is a pure reducer (`recordAttempt` -> bumps
+  iteration and accrues cost; `escalate` -> bumps depth; `finish` -> sets
+  status). `status` is `'running' | 'finished' | 'escalated'` — the last marks a
+  task that climbed the ladder before stopping (distinguished by §11 success
+  criteria).
+- **Evaluator** (`evaluator.ts`) — a pure `EvaluatorInput → Evaluation`
+  `({ decision: 'ACCEPT'|'RETRY'|'ESCALATE'|'FINISH', confidence, issues })`.
+  Purity is what keeps the loop deterministic under identical inputs: the
+  default `hookDecisionEvaluator` maps an artifact plus a pre-computed
+  `ValidationResult` to a decision (patch+pass → ACCEPT, patch+fail → RETRY,
+  recoverable failure → ESCALATE, unrecoverable → FINISH, non-patch artifacts
+  → ACCEPT). An LLM-as-judge is a drop-in `Evaluator` at the cost of that
+  determinism. Confidence in RETRY verdicts scales inversely with error count
+  (fewer errors → higher confidence it's a near-miss, not a bad approach).
+- **Router** (`router.ts`) — the *only* component that continues the loop.
+  A pure `(state, evaluation) → RouterAction` function with deliberate
+  precedence: a decisive Evaluator verdict (ACCEPT/FINISH) wins immediately,
+  then hard bounds (§6) fire (they can only STOP the loop, never extend it),
+  then convergence heuristics check for stability (same-tier confidence Δ <
+  2% → stable) or negligible improvement (Δ confidence ≤ 1% and no fewer
+  issues → spinning), and only then are RETRY/ESCALATE honored within their
+  bounds (max 3 escalation depth, configurable). Bounds are always checked
+  before honoring a RETRY, so iteration can never push past maxIterations.
+  Cross-tier confidence plateaus never stall escalation — stability is gated
+  on same-tier comparisons only. RouterBounds are all configurable:
 
-Deliberately not adopted from LangGraph: checkpointer backends (the state
-engine owns persistence), thread ids (a checkpoint is a plain JSON value),
-and runnable/message abstractions (a node is a function; artifacts are the
-currency).
+```ts
+interface RouterBounds {
+  maxIterations: number       // default 5
+  maxEscalationDepth: number  // default 3
+  maxCost: number             // relative cost units, default ∞
+  confidenceEpsilon: number   // default 0.02
+  improvementEpsilon: number  // default 0.01
+}
+```
+
+- **Loop engine** (`loop-engine.ts`) — wires the three seams in a single
+  bounded `while`; advances the ladder rung only on `escalate`, stops only on
+  `finish`. Contains a hard iteration guard as backstop (mirrors
+  `maxIterations` so a malformed custom Router can never spin forever). The
+  default `ladderProducer` dispatches exactly **one** rung per loop body (never
+  walking the ladder itself — escalation is the Router's job), applies a patch
+  artifact and runs the project's hooks so the Evaluator gets a deterministic
+  verdict, and swaps in an error-only packet on same-tier retries. Constraints
+  hold structurally: every output is evaluated before the Router runs, no
+  recursion, and no worker invokes another worker.
+- **Context service** (`context-service.ts`) — the context-on-demand seam
+  extracted from the kernel: a `ContextService` interface with a `fetch`
+  method. `defaultContextService()` wraps `compileContext` and tracks fetch
+  count internally, consulting the `ContextPolicy` before each fetch. The
+  loop engine accepts a service instance instead of a raw callback, so tests
+  inject a mock without touching the kernel.
+
+Kernel entry: `executeTask` (`kernel/dispatch-orchestrator.ts`) and
+`runBlueprint` (`kernel/blueprint-orchestrator.ts`) — both share the same
+`prepareDispatch` pipeline, budget, persistence path, and context-on-demand
+service; the Router drives every continuation decision. `cortex dispatch`
+and `cortex loop` are the same `executeTask` call with different bounds
+(`runTask`/`runLoop` remain as deprecated aliases). The barrel module
+`kernel/index.ts` re-exports everything so callers import from one place.
 
 ### State engine & learning (`state/`)
 
@@ -288,9 +353,6 @@ currency).
 - `artifacts/<taskId>/*.json` — persisted decisions, reviews, plans.
 - `metrics.jsonl` — one record per dispatch: worker, tier, tokens in/out (est),
   latency, iterations, ok/fail, context level. Append-only.
-- `runs/<runId>.json` — execution-graph checkpoints: the non-failure node
-  results of a run (failures and cancellations are never persisted — they
-  must re-run on resume).
 - `workers.json` — optional project-local worker registry overlay.
 
 `metrics.ts` aggregates per-worker success rate / mean latency / mean tokens
@@ -320,6 +382,27 @@ same fields it already documents, now typed and validated by the kernel.
 5. **Surface** — CLI (`run|plan|locate|workers|metrics`), validation-loop
    rewire, tests green, SKILL.md + README updates, migration notes.
 
+6. **Closed-loop execution** — CUEA loop: execution state, evaluator, router,
+   loop engine + ladderProducer; `executeTask` kernel entry; router-bound
+   termination (maxIterations, maxEscalationDepth, maxCost, convergence
+   heuristics); deterministic under identical inputs by construction;
+   `test/router.test.ts` (12 unit tests), `test/loop-engine.test.ts`
+   (integration: accept, retry, escalate, max iterations, ladder exhaustion,
+   determinism).
+
+7. **MVP execution model** — generic Skill layer (`skill/`: the primitive
+   execution unit; triage and grilling are ordinary skills), Execution
+   Blueprints (`blueprint/`: workflows as registered data; debug / feature /
+   pr-review / default built-ins; the runtime knows nothing about any of
+   them), first-class Policies (`policy/`: retry, escalation, clarification,
+   context, budget, timeout — Router bounds are a projection), Compiler
+   Runtime facade (`compiler/runtime.ts`: Intent/Context/Artifact services,
+   replaceable), context-on-demand in the loop (Evaluations express
+   `missingContext`; a policy-gated provider fetches minimal context
+   mid-loop), a `clarification` artifact kind, and the `runBlueprint` kernel
+   entry surfaced as `cortex exec` and MCP `cortex_exec`. Extension guide:
+   `docs/EXTENDING.md`.
+
 Each phase compiles and tests green before the next begins.
 
 ## Migration
@@ -331,6 +414,20 @@ Each phase compiles and tests green before the next begins.
   first write; old file left in place, read-only.
 - v1 packets accepted on input paths; all emitted packets are v2.
 - `$UCP_TOOLCHAIN_DIR` still honored (alias of `$CORTEX_DIR`).
+
+Library-level renames (2026-07, breaking for importers; CLI/MCP unchanged):
+
+- `capability/policy.ts` → `capability/constraints.ts`: `Policy` →
+  `PlannerConstraints`, `DEFAULT_POLICY` → `DEFAULT_CONSTRAINTS`,
+  `checkPolicy` → `checkConstraints`; `KernelConfig.policy` →
+  `KernelConfig.constraints`. "Policy" now refers solely to the
+  execution-lifecycle `PolicySet` (`policy/policies.ts`).
+- Triage vocabulary: `triage/skill.ts` → `triage/stage.ts`,
+  `triage/skills/` → `triage/stages/`; `registerSkill`/`getSkill`/
+  `registeredSkills` (triage registry) → `registerStage`/`getStage`/
+  `registeredStages`; `TriagePolicy.disabledSkills` → `disabledStages`.
+  "Skill" now refers solely to the execution unit (`skill/skill.ts`).
+- `runTask`/`runLoop` → `executeTask` (deprecated aliases retained).
 
 ## Tradeoffs accepted
 

@@ -5,8 +5,9 @@
 // rung is exhausted or the intent itself demands deep reasoning.
 import { type TaskIntent, type Complexity } from './capabilities.js'
 import { type WorkerSpec, type WorkerRegistry, type WorkerTier } from '../worker/registry.js'
-import { type Policy, DEFAULT_POLICY, checkPolicy } from './policy.js'
+import { type PlannerConstraints, DEFAULT_CONSTRAINTS, checkConstraints } from './constraints.js'
 import { estimateSpend } from '../packet/budget-controller.js'
+import { DefaultResolver } from './resolver.js'
 
 export interface ScoredWorker {
   worker: WorkerSpec
@@ -71,9 +72,11 @@ export function scoreWorker(
 export function planDispatch(
   intent: TaskIntent,
   registry: WorkerRegistry,
-  policy: Policy = DEFAULT_POLICY,
+  constraints: PlannerConstraints = DEFAULT_CONSTRAINTS,
   reliabilityOverrides: ReliabilityOverrides = new Map(),
   retryProbability = 0.25,
+  tierHint?: string,
+  maxSpend = Number.POSITIVE_INFINITY,
 ): Plan {
   if (intent.taskType === 'locate') {
     return { tier0: true, entryTier: 1, ladder: [], excluded: [] }
@@ -87,39 +90,34 @@ export function planDispatch(
     entryTier = 3
   }
 
-  const excluded: { workerId: string; reason: string }[] = []
-  const feasible: WorkerSpec[] = []
-
-  for (const worker of registry.withCapabilities(intent.capabilities)) {
-    const verdict = checkPolicy(worker, intent, policy)
-    if (!verdict.allowed) {
-      excluded.push({ workerId: worker.id, reason: verdict.reason ?? 'policy' })
-      continue
-    }
-    feasible.push(worker)
-  }
-  for (const worker of registry.workers) {
-    if (!feasible.includes(worker) && !excluded.some(e => e.workerId === worker.id)) {
-      excluded.push({ workerId: worker.id, reason: `missing capability (needs ${intent.capabilities.join('+')})` })
-    }
+  // Triage routing hint overrides the entry tier when present — it has richer
+  // signal analysis (file count, ambiguity, verb patterns) than the intent
+  // compiler's complexity heuristic.
+  if (tierHint) {
+    const mapped: Record<string, WorkerTier> = { T0: 1, T1: 1, T2: 2, T3: 3, T4: 3 }
+    entryTier = mapped[tierHint] ?? entryTier
   }
 
-  const scored = feasible.map(w =>
-    scoreWorker(w, intent, retryProbability, reliabilityOverrides.get(w.id)),
+  // Delegate worker feasibility, scoring, and ladder construction to the
+  // DefaultResolver. planDispatch adds entry-tier ordering on top.
+  const resolver = new DefaultResolver()
+  const resolution = resolver.resolve(
+    {
+      capabilities: intent.capabilities,
+      profile: { minimum: [] },
+      expectedOutput: intent.expectedOutput,
+      estTokenBudget: intent.estTokenBudget,
+      retryProbability,
+      reliabilityOverrides,
+      maxSpend,
+    },
+    registry,
+    constraints,
   )
 
-  // Spend gate is policy, not preference: over-cap workers drop out entirely.
-  const affordable = scored.filter(s => {
-    if (s.expectedSpend > policy.maxSpendPerDispatch) {
-      excluded.push({ workerId: s.worker.id, reason: `spend ${s.expectedSpend.toFixed(2)} over cap ${policy.maxSpendPerDispatch}` })
-      return false
-    }
-    return true
-  })
-
-  // Ladder: rungs at/below entry tier come first (cheapest viable start),
-  // then higher tiers as escalation. Within a tier, best utility first.
-  const ladder = affordable.sort((a, b) => {
+  // Entry-tier ordering: workers at/below entry tier come first (cheapest
+  // viable start), then higher tiers as escalation.
+  const ladder = resolution.ladder.sort((a, b) => {
     const aEsc = a.worker.tier > entryTier ? 1 : 0
     const bEsc = b.worker.tier > entryTier ? 1 : 0
     if (aEsc !== bEsc) return aEsc - bEsc
@@ -129,5 +127,15 @@ export function planDispatch(
     return b.utility - a.utility
   })
 
-  return { tier0: false, entryTier, ladder, excluded }
+  return {
+    tier0: false,
+    entryTier,
+    ladder: ladder.map(w => ({
+      worker: w.worker,
+      utility: w.utility,
+      expectedSpend: w.expectedSpend,
+      justification: w.justification,
+    })),
+    excluded: resolution.excluded.map(e => ({ workerId: e.workerId, reason: e.reason })),
+  }
 }

@@ -61,7 +61,10 @@ export function readMetrics(projectRoot: string): MetricRecord[] {
       }
     }
     return records
-  } catch {
+  } catch (e: unknown) {
+    if ((e as NodeJS.ErrnoException).code !== 'ENOENT') {
+      debug(`metrics: cannot read metrics file — ${e instanceof Error ? e.message : String(e)}`)
+    }
     return []
   }
 }

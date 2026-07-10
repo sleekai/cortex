@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import * as assert from 'node:assert/strict'
-import { parseWorkerOutput } from '../src/worker/output-parser.js'
+import { parseWorkerOutput } from '../src/worker/artifact-builder.js'
 import { isKind } from '../src/artifact/artifacts.js'
 import { type UCP } from '../src/packet/ucp.js'
 

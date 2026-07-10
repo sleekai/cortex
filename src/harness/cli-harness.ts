@@ -83,6 +83,11 @@ export class CliHarness implements Harness {
         resolve({ ok: true, output: stdout.trim(), latencyMs: Date.now() - start })
       })
 
+      // The child may close stdin before we finish writing (fast commands that
+      // ignore input). That surfaces as an EPIPE error event on the stdin stream;
+      // without a listener Node rethrows it as an uncaught exception. The real
+      // result is owned by the close/error handlers above, so swallow pipe errors.
+      child.stdin.on('error', () => {})
       if (this.config.promptVia === 'stdin') {
         child.stdin.write(req.prompt)
       }

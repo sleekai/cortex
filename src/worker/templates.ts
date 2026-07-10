@@ -89,6 +89,49 @@ export function anthropicTemplate(args: AnthropicTemplateArgs): WorkerSpec {
   }
 }
 
+// ── ChatGPT (OpenAI Chat Completions) ───────────────────────────────────
+// A named preset for OpenAI's hosted ChatGPT models — the same wire protocol
+// as openAiTemplate, but keyed off CHATGPT_API_KEY first so a ChatGPT worker
+// and a generic OpenAI-compatible worker can hold distinct credentials.
+
+export interface ChatGptTemplateArgs extends TemplateArgs {
+  apiKey?: string
+  model?: string
+  baseUrl?: string
+}
+
+export function chatGptTemplate(args: ChatGptTemplateArgs): WorkerSpec {
+  const model = args.model ?? 'gpt-4o'
+  const baseUrl = args.baseUrl ?? 'https://api.openai.com/v1'
+  const apiKey = args.apiKey ?? process.env['CHATGPT_API_KEY'] ?? process.env['OPENAI_API_KEY'] ?? ''
+  return {
+    id: args.id,
+    capabilities: args.capabilities ?? ['coding', 'reasoning', 'planning', 'review', 'docs'],
+    harness: {
+      kind: 'http',
+      url: `${baseUrl}/chat/completions`,
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${apiKey}`,
+      },
+      bodyTemplate: {
+        model,
+        messages: [{ role: 'user', content: '{{prompt}}' }],
+        max_tokens: 4096,
+      },
+      outputPath: 'choices.0.message.content',
+    },
+    cost: { inPer1k: 2.5, outPer1k: 10 },
+    speed: 0.6,
+    contextWindow: 128000,
+    quality: { coding: 0.85, reasoning: 0.88, planning: 0.8, review: 0.82, docs: 0.8 },
+    reliability: 0.95,
+    tier: args.tier ?? 3,
+    writeAccess: args.writeAccess ?? 'patch',
+  }
+}
+
 // ── Ollama (local) ──────────────────────────────────────────────────────
 
 export interface OllamaTemplateArgs extends TemplateArgs {
@@ -211,7 +254,7 @@ export function opencodeAdapter(args: AdapterArgs): WorkerSpec {
     harness: {
       kind: 'cli',
       bin: 'opencode',
-      args: ['-p', '-t', '{{prompt}}', '-y'],
+      args: ['run', '--format', 'default', '--auto'],
       stripEnv: [],
       promptVia: 'arg',
       probeArgs: ['--version'],
@@ -222,6 +265,52 @@ export function opencodeAdapter(args: AdapterArgs): WorkerSpec {
     contextWindow: 128000,
     quality: { coding: 0.88, reasoning: 0.9, planning: 0.85, review: 0.85, docs: 0.8 },
     reliability: 0.85,
+    tier: args.tier ?? 3,
+    writeAccess: args.writeAccess ?? 'patch',
+  }
+}
+
+export function codexAdapter(args: AdapterArgs): WorkerSpec {
+  return {
+    id: args.id ?? 'codex',
+    capabilities: ['coding', 'reasoning', 'planning', 'review', 'docs'],
+    harness: {
+      kind: 'cli',
+      bin: 'codex',
+      args: ['exec', '--full-auto'],
+      stripEnv: [],
+      promptVia: 'arg',
+      probeArgs: ['--version'],
+      binEnvOverride: args.binEnvOverride ?? 'CODEX_BIN',
+    },
+    cost: { inPer1k: 3, outPer1k: 15 },
+    speed: 0.35,
+    contextWindow: 200000,
+    quality: { coding: 0.94, reasoning: 0.93, planning: 0.9, review: 0.88, docs: 0.85 },
+    reliability: 0.88,
+    tier: args.tier ?? 3,
+    writeAccess: args.writeAccess ?? 'patch',
+  }
+}
+
+export function cursorAdapter(args: AdapterArgs): WorkerSpec {
+  return {
+    id: args.id ?? 'cursor',
+    capabilities: ['coding', 'reasoning', 'planning', 'review', 'docs'],
+    harness: {
+      kind: 'cli',
+      bin: 'agent',
+      args: ['-p', '--trust', '--force', '--output-format', 'text'],
+      stripEnv: [],
+      promptVia: 'arg',
+      probeArgs: ['--version'],
+      binEnvOverride: args.binEnvOverride ?? 'CURSOR_AGENT_BIN',
+    },
+    cost: { inPer1k: 3, outPer1k: 15 },
+    speed: 0.4,
+    contextWindow: 200000,
+    quality: { coding: 0.93, reasoning: 0.92, planning: 0.88, review: 0.88, docs: 0.84 },
+    reliability: 0.87,
     tier: args.tier ?? 3,
     writeAccess: args.writeAccess ?? 'patch',
   }
@@ -255,10 +344,13 @@ export function claudeCliAdapter(args: AdapterArgs): WorkerSpec {
 export type TemplateKind =
   | 'openai'
   | 'anthropic'
+  | 'chatgpt'
   | 'ollama'
   | 'cli'
   | 'http'
   | 'opencode'
+  | 'codex'
+  | 'cursor'
   | 'claude-cli'
 
 export interface TemplateInfo {
@@ -271,8 +363,11 @@ export interface TemplateInfo {
 export const TEMPLATES: TemplateInfo[] = [
   { kind: 'openai', label: 'OpenAI-compatible', description: 'OpenAI API or any OpenAI-compatible endpoint (OpenAI, Groq, Together, etc.)' },
   { kind: 'anthropic', label: 'Anthropic', description: 'Anthropic Messages API (Claude models)' },
+  { kind: 'chatgpt', label: 'ChatGPT', description: 'OpenAI ChatGPT via Chat Completions (CHATGPT_API_KEY or OPENAI_API_KEY)' },
   { kind: 'ollama', label: 'Ollama (local)', description: 'Local Ollama instance' },
   { kind: 'opencode', label: 'OpenCode', description: 'OpenCode CLI agent (zero-config)', adapter: true },
+  { kind: 'codex', label: 'Codex', description: 'OpenAI Codex CLI via codex exec (zero-config)', adapter: true },
+  { kind: 'cursor', label: 'Cursor', description: 'Cursor Agent CLI via agent -p (zero-config)', adapter: true },
   { kind: 'claude-cli', label: 'Claude CLI', description: 'Claude CLI (zero-config)', adapter: true },
   { kind: 'cli', label: 'Generic CLI', description: 'Any CLI binary (llamafile, local models, etc.)' },
   { kind: 'http', label: 'Generic HTTP', description: 'Any HTTP API with JSON body/response' },

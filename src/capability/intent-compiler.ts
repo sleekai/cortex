@@ -5,6 +5,7 @@
 import { type TaskIntent, type TaskType, type Complexity, type ReasoningDepth, type Capability } from './capabilities.js'
 import { type ArtifactKind } from '../artifact/artifacts.js'
 import { DEFAULT_BUDGET } from '../core/types.js'
+import { OPEN_SIGNALS, TRIVIAL_SIGNALS, extractFileTokens, classifyComplexity } from '../core/signals.js'
 
 const TYPE_SIGNALS: Record<TaskType, RegExp[]> = {
   review: [/\breview\b/i, /\baudit\b/i, /\bjudge\b/i, /\bcritique\b/i],
@@ -17,11 +18,6 @@ const TYPE_SIGNALS: Record<TaskType, RegExp[]> = {
 // Order matters: a "review the fix" request is a review, not a patch.
 const TYPE_PRIORITY: TaskType[] = ['review', 'plan', 'locate', 'question', 'patch']
 
-const OPEN_SIGNALS = [/\bre-?architect/i, /\bacross\b/i, /\ball\b/i, /\bentire\b/i, /\bmigrat/i, /\bredesign\b/i, /\bcross-cutting\b/i]
-const TRIVIAL_SIGNALS = [/\btypo\b/i, /\brename\b/i, /\bcomment\b/i, /\bformat\b/i, /\bbump\b/i, /\bone[- ]line\b/i]
-
-const FILE_HINT = /(?:^|[\s"'`(])((?:[\w.-]+\/)*[\w.-]+\.(?:ts|tsx|js|jsx|mjs|cjs|json|md|css|html|py|go|rs|java|rb|php|sh|yml|yaml|toml))(?=$|[\s"'`),:;])/g
-
 function detectTaskType(text: string): { taskType: TaskType; matched: boolean } {
   for (const t of TYPE_PRIORITY) {
     if (TYPE_SIGNALS[t].some(rx => rx.test(text))) return { taskType: t, matched: true }
@@ -30,19 +26,7 @@ function detectTaskType(text: string): { taskType: TaskType; matched: boolean } 
 }
 
 function detectComplexity(text: string, fileHints: string[]): Complexity {
-  if (OPEN_SIGNALS.some(rx => rx.test(text))) return 'open'
-  if (TRIVIAL_SIGNALS.some(rx => rx.test(text)) && fileHints.length <= 1) return 'trivial'
-  if (fileHints.length > 3) return 'open'
-  return 'bounded'
-}
-
-function extractFileHints(text: string): string[] {
-  const hints = new Set<string>()
-  let match: RegExpExecArray | null
-  while ((match = FILE_HINT.exec(text)) !== null) {
-    hints.add(match[1]!)
-  }
-  return [...hints]
+  return classifyComplexity(text, fileHints.length)
 }
 
 const TYPE_TO_CAPABILITIES: Record<TaskType, Capability[]> = {
@@ -75,7 +59,7 @@ const COMPLEXITY_TO_BUDGET: Record<Complexity, number> = {
 
 export function compileIntent(request: string): TaskIntent {
   const text = request.trim()
-  const fileHints = extractFileHints(text)
+  const fileHints = extractFileTokens(text)
   const { taskType, matched } = detectTaskType(text)
   const complexity = detectComplexity(text, fileHints)
 
