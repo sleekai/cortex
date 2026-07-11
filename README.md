@@ -1,128 +1,126 @@
 # Cortex — AI Compute Operating System
 
-Model-agnostic, harness-agnostic, protocol-agnostic dispatch kernel for AI workloads.
+A harness-agnostic, policy-driven execution kernel: it decides what executes,
+where, with how much context, at what spend. Models, CLIs, and HTTP APIs are
+plugins; Cortex is the operating system.
 
 ```bash
-npm install @sleekai/cortex
-npx cortex init            # scaffold .cortex/ state directory
-npx cortex add-worker      # register a worker (interactive; or --provider)
-npx cortex dispatch "task" # dispatch to best available worker
-npx cortex plan "task"     # preview dispatch plan, zero model calls
-npx cortex locate "query"  # deterministic code pointers, zero model calls
+cargo build --release
+cortex execute blueprint.json   # Compile + execute a blueprint
+cortex plan blueprint.json      # Print dispatch plan, zero execution
 ```
 
 ## What is Cortex?
 
-Cortex is the OS for AI compute. It manages **dispatch** — deciding which AI worker (model, provider, or local process) gets each task, how much context to give it, and whether the result passes validation.
+Cortex is a **pure reducer loop** that walks an `ExecutionGraph` node by node.
+For each node it delegates to a `DirectiveExecutor` (the I/O seam), translates
+the result into an `Event`, and feeds it to a `PolicyPipeline` that decides the
+next transition — continue, move to another node, halt, or await user input.
 
-**Key properties:**
-
-- **Capability-planned** — intent compiler classifies tasks into 11 capability dimensions; expected-utility planner selects the optimal worker from a registry.
-- **Budget-capped** — hard token budget (default 2500), degrade-cascade that drops lowest-ranked context before expanding.
-- **Harness-agnostic** — CLI subprocess and HTTP/JSON are built-in; the harness registry is extensible (MCP, A2A, browser).
-- **Stateful metrics, stateless dispatch** — per-worker reliability is learned from an append-only JSONL log; every dispatch is a fresh invocation.
-- **Zero neural dependencies** — retrieval uses TF-IDF over identifier tokens, not embeddings.
+The kernel knows nothing about LLMs, transport protocols, or artifact schemas.
 
 ## Architecture
 
 ```
-Task → Intent Compiler → Capability Planner → Context Compiler
-      → UCP v2 Packet → Budget Controller → Harness → Validated Output
+BlueprintAst (JSON/YAML)
+  │
+  ▼
+Blueprint Compiler  ──►  ExecutionGraph
+                               │
+                         KernelInterpreter  ──►  DirectiveExecutor  ──►  Provider
+                          │       │                                       │
+                          │       ▼                                       ▼
+                          │   Event                                  Worker / API
+                          │       │
+                          ▼       ▼
+                      PolicyPipeline
+                     (MaxIterations → Budget → Retry → Router)
 ```
 
-The pipeline lives in the **kernel** (`src/kernel/`: `planTask` / `prepareDispatch`
-in `kernel.ts`, `executeTask` in `dispatch-orchestrator.ts`,
-`runBlueprint` in `blueprint-orchestrator.ts`). The CLI and the MCP server are
-thin surfaces over it; every surface persists artifacts, state, and metrics
-identically. `cortex dispatch` and `cortex loop` are the same `executeTask`
-call with different bounds.
+## Design principles
 
-- **Intent compiler** — deterministic regex-based classifier (zero model calls)
-- **Capability planner** — expected-utility ladder (EU = quality × reliability / cost × latency)
-- **Progressive context compiler** — 5 levels (L0 file names → L4 full source), budget-aware
-- **UCP v2** — Ultra-Compact Packet grammar, versioned, single-letter keys
-- **Worker registry** — JSON data, not privileged code; project overlays
-- **CUEA loop** — Producer → Evaluator → Router cycle: apply → hooks →
-  error-only retry or ladder escalation under explicit bounds
+- **Kernel purity**: the kernel never mutates policy-managed state, performs
+  I/O, or interprets domain concepts — it is a mechanical loop.
+- **Star topology**: all functional crates depend only on `cortex-types`.
+  `cortex-cli` is the sole composition root wiring trait objects together.
+  *See ADR-001.*
+- **Artifacts as references**: the kernel passes lightweight `Artifact`
+  envelopes (ID, kind URI, content hash). Content lives in a
+  content-addressable WORM store (SHA-256).
+  *See ADR-002, ADR-009.*
+- **Directives as stateless transforms**: directives are pure functions over
+  JSON values — `prepare()` builds execution requests, `parse()` transforms
+  responses. All I/O lives in the runtime. *See ADR-010.*
 
-See [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md) for subsystem designs,
-[docs/AUDIT.md](./docs/AUDIT.md) for the repository audit, gap analysis, and
-deliberate deferrals, [CONTEXT.md](./CONTEXT.md) for the domain glossary,
-and [docs/adr/](./docs/adr/) for architecture decision records.
+## Project structure (Rust workspace)
+
+| Crate | Role |
+|---|---|
+| `cortex-types` | IR types (Artifact, Node, Edge, ExecutionGraph, Event, Cost) and all traits (Directive, Policy, ArtifactStore, DirectiveExecutor) |
+| `cortex-kernel` | Pure reducer loop — `KernelInterpreter::run()` |
+| `cortex-policy` | `PolicyPipeline` with MaxIterations, Budget, Retry, Router policies |
+| `cortex-blueprint` | `BlueprintAst` schema → `ExecutionGraph` compiler |
+| `cortex-directives` | `Directive` trait implementations (PlanDirective) |
+| `cortex-runtime` | I/O seam — `CortexExecutor`, `InMemoryStore`, `Provider` trait |
+| `cortex-cli` | Composition root — `execute` and `plan` commands |
+| `cortex-store` | Store abstractions (stub) |
+| `cortex-adapters` | Adapter crate (stub) |
+| `cortex-registry` | Registry crate (stub) |
+
+All leaf crates depend only on `cortex-types`. No leaf-to-leaf dependencies.
 
 ## Commands
 
 | Command | Description |
-|---------|-------------|
-| `cortex init` | Scaffold `.cortex/` state directory |
-| `cortex dispatch <task>` | Dispatch a task to the best worker |
-| `cortex loop <task>` | CUEA closed loop: Producer → Evaluator → Router |
-| `cortex exec <task>` | Blueprint execution: triage → skills → closed loop |
-| `cortex blueprints` | List registered execution blueprints |
-| `cortex skills` | List registered execution skills |
-| `cortex plan <task>` | Print dispatch plan, zero model calls |
-| `cortex locate <query>` | Deterministic code pointers |
-| `cortex workers` | List registered workers |
-| `cortex metrics` | Per-worker reliability stats |
-| `cortex add-worker [provider]` | Register a worker from a template |
+|---|---|
+| `cortex execute <blueprint.json>` | Compile BlueprintAst → ExecutionGraph, run the kernel loop, print final status and cost |
+| `cortex plan <blueprint.json>` | Compile and print the dispatch plan without executing |
 
-`cortex run` is an alias for `cortex dispatch`.
-
-### Blueprint execution
-
-`cortex exec` runs the full execution model: the triage *skill* classifies
-the task and recommends a *blueprint* (`debug`, `feature`, `pr-review`,
-`default`); the runner executes its steps — skills conditionally, `produce`
-steps through the closed loop — under a named *policy set*. Ambiguous tasks
-halt with clarification questions (exit code 2) instead of burning tokens.
+## Build & run
 
 ```bash
-cortex exec "fix the login crash" --blueprint debug --policies generous
-cortex exec "add pagination to the users endpoint"   # triage picks 'feature'
+cargo build --release
+cargo run --release -- execute path/to/blueprint.json
+cargo run --release -- plan path/to/blueprint.json
 ```
 
-Skills, blueprints, and policy sets are all registries — see
-`docs/EXTENDING.md` for the plugin guide.
+The blueprint input is a `BlueprintAst` JSON file describing nodes, edges, and
+directive bindings. See `cortex-blueprint/src/ast.rs` for the schema.
 
-### Adding workers
+## Key concepts
 
-Interactive with no flags, or one-shot:
+- **ExecutionGraph** — directed IR of `Node`s and `Edge`s, compiled from a
+  `BlueprintAst`. The kernel walks this graph linearly.
+- **KernelInterpreter** — the pure reducer loop. For each node: execute →
+  translate to Event → feed PolicyPipeline → apply PolicyAction.
+- **PolicyPipeline** — sequential chain of policies. The first to return
+  something other than `Continue` wins (short-circuit).
+- **DirectiveExecutor** — the single I/O seam. Hydrates artifacts from store,
+  calls `Directive::prepare()` and `Directive::parse()`, invokes Provider,
+  dehydrates results.
+- **Provider** — owns transport and session lifecycle for an execution backend.
+- **ArtifactStore** — async content-addressable WORM store (SHA-256 keyed).
 
-```bash
-cortex add-worker opencode                          # zero-config adapter
-cortex add-worker codex                             # zero-config adapter
-cortex add-worker cursor                            # zero-config adapter
-cortex add-worker claude-cli                        # zero-config adapter
-cortex add-worker openai --model gpt-4o-mini --id openai-cheap
-cortex add-worker anthropic --model claude-sonnet-4-20250514
-cortex add-worker ollama --model llama3.2 --base-url http://localhost:11434
-cortex add-worker cli --id my-llamafile --bin ./llamafile
-```
+## Implementation status
 
-Workers land in `.cortex/workers.json` — data, hot-swappable, no kernel code.
+| Area | Status |
+|---|---|
+| `cortex-types` | All IR types, traits, capabilities, schemas, validation — fully implemented |
+| `cortex-kernel` | KernelInterpreter reducer loop — implemented |
+| `cortex-policy` | PolicyPipeline + 4 concrete policies — implemented |
+| `cortex-blueprint` | BlueprintAst schema + compiler — implemented |
+| `cortex-directives` | PlanDirective — stub (only one directive) |
+| `cortex-runtime` | CortexExecutor, InMemoryStore, Provider trait — partially implemented |
+| `cortex-cli` | `execute` and `plan` commands — implemented |
+| Other crates | Stubs (cortex-store, cortex-adapters, cortex-registry) |
 
-## MCP Server
+See [PLAN.md](./PLAN.md) for the full roadmap.
 
-`cortex-mcp` (stdio) exposes the kernel to any MCP client: `cortex_plan`,
-`cortex_locate`, `cortex_workers`, `cortex_metrics`, `cortex_dispatch`,
-`cortex_exec`, `cortex_init`, plus a `cortex://registry` resource.
+## Documentation
 
-```json
-{ "mcpServers": { "cortex": { "command": "npx", "args": ["cortex-mcp"] } } }
-```
-
-## Configuration
-
-- **`CORTEX_DIR`** env var — override state directory path
-- **`--state-dir`** flag — per-invocation override (takes precedence)
-- **`.cortex/workers.json`** — project-local worker registry overlay
-- **`.cortex/state.json`** — distilled facts, no history
-- **`.cortex/metrics.jsonl`** — append-only dispatch records
-- **`.cortex/artifacts/<taskId>/`** — persisted typed artifacts per task
-
-## UCP v2 Packet Format
-
-See [docs/UCP-SPEC.md](./docs/UCP-SPEC.md) for the canonical wire format spec.
+- [docs/GLOSSARY.md](./docs/GLOSSARY.md) — canonical terms
+- [docs/adr/](./docs/adr/) — 10 architecture decision records
+- [CONTEXT.md](./CONTEXT.md) — overview and design principles
 
 ## License
 
