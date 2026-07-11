@@ -4,7 +4,16 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
-cortex-adapters = { path = "../cortex-adapters" }
+cortex-types = { path = "../cortex-types" }
 cortex-kernel = { path = "../cortex-kernel" }
+cortex-policy = { path = "../cortex-policy" }
+cortex-directives = { path = "../cortex-directives" }
+cortex-runtime = { path = "../cortex-runtime" }
+cortex-blueprint = { path = "../cortex-blueprint" }
+async-trait.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+uuid.workspace = true

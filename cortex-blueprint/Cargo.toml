@@ -7,3 +7,4 @@ edition.workspace = true
 cortex-types = { path = "../cortex-types" }
 serde.workspace = true
 serde_json.workspace = true
+thiserror.workspace = true

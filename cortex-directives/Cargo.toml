@@ -1,12 +1,9 @@
 [package]
-name = "cortex-kernel"
+name = "cortex-directives"
 version.workspace = true
 edition.workspace = true
 
 [dependencies]
 cortex-types = { path = "../cortex-types" }
-async-trait.workspace = true
-
-[dev-dependencies]
-tokio.workspace = true
-uuid.workspace = true
+serde.workspace = true
+serde_json.workspace = true
