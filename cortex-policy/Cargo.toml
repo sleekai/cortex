@@ -1,0 +1,8 @@
+[package]
+name = "cortex-policy"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+cortex-types = { path = "../cortex-types" }
+serde.workspace = true

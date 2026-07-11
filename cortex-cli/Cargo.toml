@@ -1,0 +1,10 @@
+[package]
+name = "cortex-cli"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+cortex-adapters = { path = "../cortex-adapters" }
+cortex-kernel = { path = "../cortex-kernel" }
+serde.workspace = true
+serde_json.workspace = true

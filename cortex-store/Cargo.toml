@@ -1,0 +1,9 @@
+[package]
+name = "cortex-store"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+cortex-types = { path = "../cortex-types" }
+serde.workspace = true
+serde_json.workspace = true
